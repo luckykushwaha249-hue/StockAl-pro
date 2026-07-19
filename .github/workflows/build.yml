@@ -1,20 +1,40 @@
 name: Build APK
+
 on: [push]
+
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
+
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
-      - name: Install dependencies
+          python-version: '3.12'
+
+      - name: Set up Java JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+
+      - name: Install Python dependencies
         run: |
+          python -m pip install --upgrade pip
           pip install flet
-          pip install flet-build
+          pip install -r requirements.txt
+
       - name: Build APK
-        run: flet build apk --project StockAI-Pro
+        run: flet build apk --verbose
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
