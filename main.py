@@ -121,7 +121,7 @@ def sync_market_data(conn):
             (now.strftime("%Y-%m-%d"), close_price, now.strftime("%H:%M")),
         )
         conn.commit()
-        return f"Nifty 50 Synced: ₹{close_price} at {now.strftime('%H:%M')}", True
+        return f"Nifty 50 Synced: Rs.{close_price} at {now.strftime('%H:%M')}", True
     except Exception:
         return "Sync Failed (No Internet / Data Unavailable)", False
 
@@ -161,13 +161,6 @@ def main(page: ft.Page):
     page.theme = ft.Theme(color_scheme_seed="blue", use_material3=True)
     page.padding = 0
 
-    try:
-        page.window.width = 400
-        page.window.height = 800
-    except AttributeError:
-        page.window_width = 400
-        page.window_height = 800
-
     db_conn = init_db()
 
     main_content = ft.Container(expand=True)
@@ -175,7 +168,7 @@ def main(page: ft.Page):
     # ---------- SPLASH SCREEN ----------
     splash_screen = ft.Container(
         expand=True,
-        alignment=ft.alignment.Alignment(0, 0),
+        alignment=ft.alignment.center,
         content=ft.Column(
             [
                 ft.Icon(Icons.SHOW_CHART, size=90, color=Colors.BLUE_700),
@@ -188,6 +181,23 @@ def main(page: ft.Page):
             alignment=ft.MainAxisAlignment.CENTER,
         ),
     )
+
+    # ---------- ERROR SCREEN (shown if something breaks instead of hanging forever) ----------
+    def show_error_screen(message):
+        main_content.content = ft.Container(
+            expand=True,
+            alignment=ft.alignment.center,
+            padding=20,
+            content=ft.Column(
+                [
+                    ft.Icon(Icons.ERROR_OUTLINE, size=60, color=Colors.RED),
+                    ft.Text("Something went wrong", size=20, weight=ft.FontWeight.BOLD),
+                    ft.Text(str(message), size=12, color=Colors.GREY_600, selectable=True),
+                ],
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+        )
+        page.update()
 
     # ---------- STOCK DETAILS PAGE ----------
     def show_stock_details(symbol, company_name, sector, price):
@@ -218,7 +228,7 @@ def main(page: ft.Page):
                         padding=20,
                         content=ft.Column([
                             ft.Text(f"Sector: {sector}", color=Colors.GREY_600),
-                            ft.Text(f"Price: ₹{price:,.2f}", size=32, weight=ft.FontWeight.W_800),
+                            ft.Text(f"Price: Rs.{price:,.2f}", size=32, weight=ft.FontWeight.W_800),
                             ft.Text(company_name, color=Colors.GREY_700),
                         ]),
                     )
@@ -297,7 +307,7 @@ def main(page: ft.Page):
                     ft.ListTile(
                         leading=ft.Icon(Icons.STAR, color=Colors.AMBER),
                         title=ft.Text(symbol, weight=ft.FontWeight.BOLD),
-                        subtitle=ft.Text(f"₹{price:,.2f}"),
+                        subtitle=ft.Text(f"Rs.{price:,.2f}"),
                         on_click=lambda e, s=symbol, c=company_name, p=price: show_stock_details(s, c, "N/A", p),
                     )
                 )
@@ -313,7 +323,7 @@ def main(page: ft.Page):
                     ft.ListTile(
                         leading=ft.Icon(Icons.SHOW_CHART),
                         title=ft.Text(f"{symbol} - {company_name}"),
-                        subtitle=ft.Text(f"{sector} | ₹{price:,.2f}"),
+                        subtitle=ft.Text(f"{sector} | Rs.{price:,.2f}"),
                         on_click=lambda e, s=symbol, c=company_name, sec=sector, p=price: show_stock_details(s, c, sec, p),
                     )
                 )
@@ -368,9 +378,12 @@ def main(page: ft.Page):
     )
 
     # ---------- ANALYTICS SCREEN ----------
-    market_status = ft.Text("Checking sync status...", color=Colors.GREY)
+    market_status = ft.Text("Not synced yet. Tap 'Sync Data Now'.", color=Colors.GREY)
 
     def trigger_sync(e):
+        market_status.value = "Syncing..."
+        market_status.color = Colors.GREY
+        page.update()
         msg, success = sync_market_data(db_conn)
         market_status.value = msg
         market_status.color = Colors.GREEN if success else Colors.RED
@@ -515,24 +528,72 @@ def main(page: ft.Page):
         ],
     )
 
-    # ---------- INITIAL RENDER: SPLASH -> HOME ----------
-    main_content.content = splash_screen
+    # ---------- PASSWORD LOCK SCREEN ----------
+    APP_PASSWORD = "8707352902"
+
+    password_input = ft.TextField(
+        hint_text="Enter Password",
+        password=True,
+        can_reveal_password=True,
+        border_radius=30,
+        filled=True,
+        border_color=Colors.TRANSPARENT,
+        height=55,
+        text_align=ft.TextAlign.CENTER,
+        width=260,
+    )
+    password_error = ft.Text("", color=Colors.RED, size=13)
+
+    def check_password(e):
+        if (password_input.value or "").strip() == APP_PASSWORD:
+            password_error.value = ""
+            main_content.content = splash_screen
+            page.update()
+            threading.Thread(target=load_home, daemon=True).start()
+        else:
+            password_error.value = "Wrong password. Try again."
+            password_input.value = ""
+            page.update()
+
+    password_input.on_submit = check_password
+
+    password_screen = ft.Container(
+        expand=True,
+        alignment=ft.alignment.center,
+        content=ft.Column(
+            [
+                ft.Icon(Icons.LOCK, size=70, color=Colors.BLUE_700),
+                ft.Text("StockAI Pro", size=28, weight=ft.FontWeight.BOLD),
+                ft.Text("Enter password to continue", size=14, color=Colors.GREY_500),
+                ft.Container(height=20),
+                password_input,
+                ft.Container(height=10),
+                ft.ElevatedButton("OK", on_click=check_password, width=260),
+                ft.Container(height=8),
+                password_error,
+            ],
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            alignment=ft.MainAxisAlignment.CENTER,
+        ),
+    )
+
+    # ---------- INITIAL RENDER: PASSWORD FIRST ----------
+    main_content.content = password_screen
     page.add(main_content)
 
     def load_home():
-        time.sleep(2)
-        refresh_recent_list()
-        refresh_favorites_list()
-        main_content.content = home_screen
-        page.navigation_bar = bottom_nav
-        page.update()
-
-        msg, success = sync_market_data(db_conn)
-        market_status.value = msg
-        market_status.color = Colors.GREEN if success else Colors.RED
-        page.update()
-
-    threading.Thread(target=load_home, daemon=True).start()
+        # Everything here is wrapped in try/except so the app NEVER hangs
+        # silently on the splash screen. If anything fails, a visible
+        # error message is shown instead.
+        try:
+            time.sleep(2)
+            refresh_recent_list()
+            refresh_favorites_list()
+            main_content.content = home_screen
+            page.navigation_bar = bottom_nav
+            page.update()
+        except Exception as ex:
+            show_error_screen(f"Failed to load home screen:\n{ex}")
 
 
 if __name__ == "__main__":
