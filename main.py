@@ -507,11 +507,11 @@ def main(page: ft.Page):
         selected_index=0,
         on_change=change_tab,
         destinations=[
-            ft.NavigationDestination(icon=Icons.HOME_OUTLINED, selected_icon=Icons.HOME, label="Home"),
-            ft.NavigationDestination(icon=Icons.ANALYTICS_OUTLINED, selected_icon=Icons.ANALYTICS, label="Analytics"),
-            ft.NavigationDestination(icon=Icons.DOCUMENT_SCANNER_OUTLINED, selected_icon=Icons.DOCUMENT_SCANNER, label="Scanner"),
-            ft.NavigationDestination(icon=Icons.HISTORY_OUTLINED, selected_icon=Icons.HISTORY, label="History"),
-            ft.NavigationDestination(icon=Icons.SETTINGS_OUTLINED, selected_icon=Icons.SETTINGS, label="Settings"),
+            ft.NavigationBarDestination(icon=Icons.HOME_OUTLINED, selected_icon=Icons.HOME, label="Home"),
+            ft.NavigationBarDestination(icon=Icons.ANALYTICS_OUTLINED, selected_icon=Icons.ANALYTICS, label="Analytics"),
+            ft.NavigationBarDestination(icon=Icons.DOCUMENT_SCANNER_OUTLINED, selected_icon=Icons.DOCUMENT_SCANNER, label="Scanner"),
+            ft.NavigationBarDestination(icon=Icons.HISTORY_OUTLINED, selected_icon=Icons.HISTORY, label="History"),
+            ft.NavigationBarDestination(icon=Icons.SETTINGS_OUTLINED, selected_icon=Icons.SETTINGS, label="Settings"),
         ],
     )
 
