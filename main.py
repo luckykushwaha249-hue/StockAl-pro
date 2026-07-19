@@ -175,7 +175,7 @@ def main(page: ft.Page):
     # ---------- SPLASH SCREEN ----------
     splash_screen = ft.Container(
         expand=True,
-        alignment=ft.alignment.center,
+        alignment=ft.alignment.Alignment(0, 0),
         content=ft.Column(
             [
                 ft.Icon(Icons.SHOW_CHART, size=90, color=Colors.BLUE_700),
