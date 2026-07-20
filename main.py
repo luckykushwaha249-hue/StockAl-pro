@@ -8,7 +8,7 @@ import time
 import shutil
 
 # ==========================================
-# COMPATIBILITY SHIMS (works on old & new Flet)
+# COMPATIBILITY SHIMS
 # ==========================================
 try:
     Icons = ft.Icons
@@ -20,12 +20,8 @@ try:
 except AttributeError:
     Colors = ft.colors
 
-
 # ==========================================
-# FALLBACK STOCK LIST
-# Used only if the live Nifty 500 fetch (and the cache) both fail,
-# e.g. on the very first run with no internet. This keeps the app
-# usable even when the full list can't be downloaded.
+# FALLBACK STOCK LIST 
 # ==========================================
 FALLBACK_UNIVERSE = [
     ("RELIANCE", "Reliance Industries"), ("TCS", "Tata Consultancy Services"),
@@ -34,19 +30,9 @@ FALLBACK_UNIVERSE = [
     ("LT", "Larsen & Toubro"), ("KOTAKBANK", "Kotak Mahindra Bank"),
     ("AXISBANK", "Axis Bank"), ("HCLTECH", "HCL Technologies"), ("MARUTI", "Maruti Suzuki"),
     ("SUNPHARMA", "Sun Pharma"), ("TITAN", "Titan Company"), ("BAJFINANCE", "Bajaj Finance"),
-    ("WIPRO", "Wipro Ltd"), ("ULTRACEMCO", "UltraTech Cement"), ("NESTLEIND", "Nestle India"),
     ("TATAMOTORS", "Tata Motors"), ("TATASTEEL", "Tata Steel"), ("NTPC", "NTPC Ltd"),
-    ("POWERGRID", "Power Grid Corp"), ("ONGC", "Oil & Natural Gas Corp"), ("COALINDIA", "Coal India"),
-    ("HINDUNILVR", "Hindustan Unilever"), ("ASIANPAINT", "Asian Paints"), ("ADANIENT", "Adani Enterprises"),
-    ("ADANIPORTS", "Adani Ports & SEZ"), ("BAJAJFINSV", "Bajaj Finserv"), ("CIPLA", "Cipla"),
-    ("DRREDDY", "Dr. Reddy's Laboratories"), ("EICHERMOT", "Eicher Motors"), ("GRASIM", "Grasim Industries"),
-    ("HDFCLIFE", "HDFC Life Insurance"), ("HINDALCO", "Hindalco Industries"), ("INDIGO", "InterGlobe Aviation"),
-    ("JSWSTEEL", "JSW Steel"), ("M&M", "Mahindra & Mahindra"), ("SBILIFE", "SBI Life Insurance"),
-    ("SHRIRAMFIN", "Shriram Finance"), ("TATACONSUM", "Tata Consumer Products"), ("TECHM", "Tech Mahindra"),
-    ("TRENT", "Trent Ltd"), ("HEROMOTOCO", "Hero MotoCorp"), ("APOLLOHOSP", "Apollo Hospitals"),
-    ("BAJAJ-AUTO", "Bajaj Auto"), ("BEL", "Bharat Electronics"), ("JIOFIN", "Jio Financial Services"),
+    ("ZOMATO", "Zomato Ltd"), ("JIOFIN", "Jio Financial Services"),
 ]
-
 
 # ==========================================
 # 1. DATABASE SETUP
@@ -65,6 +51,8 @@ def init_db():
                         symbol TEXT PRIMARY KEY,
                         company_name TEXT,
                         latest_price REAL,
+                        change_pct REAL,
+                        last_updated TEXT,
                         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
     cursor.execute('''CREATE TABLE IF NOT EXISTS market_summary (
@@ -99,11 +87,7 @@ def init_db():
                         key TEXT PRIMARY KEY,
                         value TEXT)''')
 
-    cursor.execute('''CREATE TABLE IF NOT EXISTS nifty500_cache (
-                        symbol TEXT PRIMARY KEY,
-                        company_name TEXT)''')
-
-    # Safe migration: add new columns to favorites if they don't exist yet
+    # Add columns for favorites if not exist
     for coldef in ("change_pct REAL", "last_updated TEXT"):
         try:
             cursor.execute(f"ALTER TABLE favorites ADD COLUMN {coldef}")
@@ -118,77 +102,20 @@ def init_db():
     conn.commit()
     return conn
 
-
 def get_setting(conn, key, default=None):
     cursor = conn.cursor()
     cursor.execute("SELECT value FROM app_settings WHERE key=?", (key,))
     row = cursor.fetchone()
     return row[0] if row else default
 
-
 def set_setting(conn, key, value):
     cursor = conn.cursor()
     cursor.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)", (key, str(value)))
     conn.commit()
 
-
 # ==========================================
-# NIFTY 500 UNIVERSE (fetched live, cached, with fallback)
+# DATABASE QUERIES & UTILS
 # ==========================================
-def fetch_nifty500_universe(conn):
-    """
-    Tries to download the official Nifty 500 constituent list from NSE.
-    On success, caches it to the database and updates stock_master.
-    On failure, uses whatever was cached from a previous successful run.
-    If there is no cache either (e.g. very first run, no internet),
-    falls back to a smaller fixed list of well-known large-cap stocks.
-    Returns a list of (symbol, company_name) tuples.
-    """
-    cursor = conn.cursor()
-    try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                          "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-            "Accept": "text/csv,application/csv,*/*",
-        }
-        session = requests.Session()
-        session.get("https://www.nseindia.com", headers=headers, timeout=10)
-        resp = session.get(
-            "https://nsearchives.nseindia.com/content/indices/ind_nifty500list.csv",
-            headers=headers, timeout=15,
-        )
-        resp.raise_for_status()
-        lines = resp.text.strip().split("\n")[1:]
-        symbols = []
-        for line in lines:
-            parts = [p.strip().strip('"') for p in line.split(",")]
-            if len(parts) >= 3 and parts[2]:
-                symbols.append((parts[2], parts[0]))
-        if len(symbols) >= 100:
-            cursor.execute("DELETE FROM nifty500_cache")
-            cursor.executemany(
-                "INSERT OR REPLACE INTO nifty500_cache (symbol, company_name) VALUES (?, ?)",
-                symbols,
-            )
-            cursor.executemany(
-                "INSERT OR IGNORE INTO stock_master (symbol, company_name, sector, price) VALUES (?, ?, 'N/A', 0.0)",
-                symbols,
-            )
-            conn.commit()
-            return symbols
-    except Exception:
-        pass
-
-    # Fall back to cache from a previous successful fetch
-    cursor.execute("SELECT symbol, company_name FROM nifty500_cache")
-    cached = cursor.fetchall()
-    if cached:
-        return cached
-
-    # Last resort: small fixed list
-    return FALLBACK_UNIVERSE
-
-
 def search_stock_db(conn, query):
     cursor = conn.cursor()
     cursor.execute(
@@ -198,33 +125,15 @@ def search_stock_db(conn, query):
     )
     return cursor.fetchall()
 
-
-def add_recent_search(conn, query, search_type="stock"):
+def add_recent_search(conn, query):
     cursor = conn.cursor()
-    cursor.execute("INSERT INTO recent_searches (query, search_type) VALUES (?, ?)", (query, search_type))
+    cursor.execute("INSERT INTO recent_searches (query, search_type) VALUES (?, 'stock')", (query,))
     conn.commit()
-
 
 def get_recent_searches(conn, limit=5):
     cursor = conn.cursor()
     cursor.execute("SELECT query FROM recent_searches ORDER BY timestamp DESC LIMIT ?", (limit,))
     return [row[0] for row in cursor.fetchall()]
-
-
-def add_to_watchlist(conn, symbol, company_name):
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT OR IGNORE INTO favorites (symbol, company_name, latest_price) VALUES (?, ?, 0)",
-        (symbol.upper(), company_name),
-    )
-    conn.commit()
-
-
-def remove_from_watchlist(conn, symbol):
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM favorites WHERE symbol=?", (symbol,))
-    conn.commit()
-
 
 def toggle_favorite(conn, symbol, company_name, price):
     cursor = conn.cursor()
@@ -240,38 +149,15 @@ def toggle_favorite(conn, symbol, company_name, price):
     conn.commit()
     return True
 
-
 def get_favorites(conn):
     cursor = conn.cursor()
     cursor.execute("SELECT symbol, company_name, latest_price FROM favorites")
     return cursor.fetchall()
 
-
 def get_favorites_full(conn):
     cursor = conn.cursor()
-    cursor.execute(
-        "SELECT symbol, company_name, latest_price, change_pct, last_updated FROM favorites ORDER BY symbol"
-    )
+    cursor.execute("SELECT symbol, company_name, latest_price, change_pct, last_updated FROM favorites ORDER BY symbol")
     return cursor.fetchall()
-
-
-def get_last_sync_display(conn):
-    cursor = conn.cursor()
-    cursor.execute("SELECT date, sync_time FROM market_summary ORDER BY date DESC LIMIT 1")
-    row = cursor.fetchone()
-    if row:
-        return f"Last updated: {row[0]} at {row[1]}"
-    return "Not synced yet. Tap 'Update Market Data'."
-
-
-def is_market_open():
-    now = datetime.now()
-    if now.weekday() >= 5:
-        return False
-    open_time = now.replace(hour=9, minute=15, second=0, microsecond=0)
-    close_time = now.replace(hour=15, minute=30, second=0, microsecond=0)
-    return open_time <= now <= close_time
-
 
 def get_market_movers(conn, mover_type, date=None):
     cursor = conn.cursor()
@@ -288,7 +174,6 @@ def get_market_movers(conn, mover_type, date=None):
     )
     return cursor.fetchall(), date
 
-
 def get_news_items(conn):
     cursor = conn.cursor()
     cursor.execute("DELETE FROM news_items WHERE date < date('now', '-7 days')")
@@ -299,165 +184,16 @@ def get_news_items(conn):
     )
     return cursor.fetchall()
 
-
 def google_news_url(company_name):
     query = company_name.replace(" ", "+")
     return f"https://news.google.com/search?q={query}%20share%20price&hl=en-IN&gl=IN&ceid=IN:en"
 
-
-def perform_full_market_sync(conn, progress_callback=None):
-    """
-    Downloads the Nifty 500 universe, fetches price data for every stock,
-    computes Top 10 Gainers and Top 10 Losers, updates the watchlist and
-    the news feed. Works whether the market is open (near real-time) or
-    closed (returns the last available trading day's data).
-    """
-    try:
-        if progress_callback:
-            progress_callback("Fetching Nifty 500 stock list...")
-        universe = fetch_nifty500_universe(conn)
-
-        symbols_only = [s for s, _ in universe]
-        name_lookup = {s: n for s, n in universe}
-        tickers = [f"{s}.NS" for s in symbols_only]
-
-        if progress_callback:
-            progress_callback(f"Downloading price data for {len(tickers)} stocks (this can take a minute)...")
-
-        movers = []
-        data_date = None
-        batch_size = 250
-        for i in range(0, len(tickers), batch_size):
-            batch = tickers[i:i + batch_size]
-            try:
-                data = yf.download(tickers=batch, period="5d", group_by="ticker", threads=True, progress=False)
-            except Exception:
-                continue
-
-            for ns_symbol in batch:
-                symbol = ns_symbol.replace(".NS", "")
-                try:
-                    try:
-                        closes = data[ns_symbol]["Close"].dropna()
-                    except Exception:
-                        closes = data["Close"][ns_symbol].dropna()
-                    if len(closes) < 2:
-                        continue
-                    last_close = float(closes.iloc[-1])
-                    prev_close = float(closes.iloc[-2])
-                    pct_change = round((last_close - prev_close) / prev_close * 100, 2)
-
-                    if data_date is None:
-                        data_date = closes.index[-1].strftime("%Y-%m-%d")
-
-                    movers.append({
-                        "symbol": symbol,
-                        "company_name": name_lookup.get(symbol, symbol),
-                        "price": round(last_close, 2),
-                        "pct_change": pct_change,
-                    })
-                except Exception:
-                    continue
-
-            if progress_callback:
-                progress_callback(f"Processed {min(i + batch_size, len(tickers))}/{len(tickers)} stocks...")
-            time.sleep(0.2)
-
-        if not movers or data_date is None:
-            return "Sync Failed: No data received (check internet connection)", False
-
-        gainers = sorted(movers, key=lambda m: m["pct_change"], reverse=True)[:10]
-        losers = sorted(movers, key=lambda m: m["pct_change"])[:10]
-
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM market_movers WHERE date=?", (data_date,))
-
-        for rank, m in enumerate(gainers, 1):
-            cursor.execute(
-                "INSERT INTO market_movers (date, type, rank, symbol, company_name, price, pct_change) "
-                "VALUES (?,?,?,?,?,?,?)",
-                (data_date, "gainer", rank, m["symbol"], m["company_name"], m["price"], m["pct_change"]),
-            )
-        for rank, m in enumerate(losers, 1):
-            cursor.execute(
-                "INSERT INTO market_movers (date, type, rank, symbol, company_name, price, pct_change) "
-                "VALUES (?,?,?,?,?,?,?)",
-                (data_date, "loser", rank, m["symbol"], m["company_name"], m["price"], m["pct_change"]),
-            )
-
-        # Keep search results up to date with the latest prices
-        for m in movers:
-            cursor.execute("UPDATE stock_master SET price=? WHERE symbol=?", (m["price"], m["symbol"]))
-
-        # Update watchlist with latest price / change
-        movers_by_symbol = {m["symbol"]: m for m in movers}
-        cursor.execute("SELECT symbol FROM favorites")
-        fav_symbols = [row[0] for row in cursor.fetchall()]
-        sync_timestamp = datetime.now().strftime("%d %b %Y, %H:%M")
-
-        missing_fav_symbols = [s for s in fav_symbols if s not in movers_by_symbol]
-        if missing_fav_symbols:
-            if progress_callback:
-                progress_callback("Updating your watchlist stocks...")
-            try:
-                fav_tickers = [f"{s}.NS" for s in missing_fav_symbols]
-                fav_data = yf.download(tickers=fav_tickers, period="5d", group_by="ticker", threads=True, progress=False)
-                for s in missing_fav_symbols:
-                    ns = f"{s}.NS"
-                    try:
-                        if len(missing_fav_symbols) > 1:
-                            try:
-                                closes = fav_data[ns]["Close"].dropna()
-                            except Exception:
-                                closes = fav_data["Close"][ns].dropna()
-                        else:
-                            closes = fav_data["Close"].dropna()
-                        if len(closes) >= 2:
-                            last_close = float(closes.iloc[-1])
-                            prev_close = float(closes.iloc[-2])
-                            pct = round((last_close - prev_close) / prev_close * 100, 2)
-                            movers_by_symbol[s] = {"price": round(last_close, 2), "pct_change": pct}
-                    except Exception:
-                        continue
-            except Exception:
-                pass
-
-        for symbol in fav_symbols:
-            m = movers_by_symbol.get(symbol)
-            if m:
-                cursor.execute(
-                    "UPDATE favorites SET latest_price=?, change_pct=?, last_updated=? WHERE symbol=?",
-                    (m["price"], m["pct_change"], sync_timestamp, symbol),
-                )
-
-        # News feed: union of gainers / losers (no duplicates)
-        seen = set()
-        news_entries = []
-        for lst in (gainers, losers):
-            for m in lst:
-                if m["symbol"] not in seen:
-                    seen.add(m["symbol"])
-                    news_entries.append(m)
-
-        cursor.execute("DELETE FROM news_items WHERE date=?", (data_date,))
-        for m in news_entries:
-            cursor.execute(
-                "INSERT INTO news_items (symbol, company_name, date, pct_change) VALUES (?,?,?,?)",
-                (m["symbol"], m["company_name"], data_date, m["pct_change"]),
-            )
-        cursor.execute("DELETE FROM news_items WHERE date < date('now', '-7 days')")
-
-        cursor.execute(
-            "INSERT OR REPLACE INTO market_summary (date, value, sync_time) VALUES (?, ?, ?)",
-            (data_date, gainers[0]["price"] if gainers else 0, sync_timestamp),
-        )
-        conn.commit()
-
-        status = "Live" if is_market_open() else "Closed"
-        return f"Synced ({status}) - data as of {data_date}", True
-    except Exception as e:
-        return f"Sync Failed: {e}", False
-
+def is_market_open():
+    now = datetime.now()
+    if now.weekday() >= 5: return False
+    open_time = now.replace(hour=9, minute=15, second=0, microsecond=0)
+    close_time = now.replace(hour=15, minute=30, second=0, microsecond=0)
+    return open_time <= now <= close_time
 
 def backup_database():
     try:
@@ -465,7 +201,6 @@ def backup_database():
         return "Backup Successful!"
     except Exception as e:
         return f"Backup Failed: {e}"
-
 
 def clear_cache(conn):
     try:
@@ -476,31 +211,161 @@ def clear_cache(conn):
     except Exception as e:
         return f"Clear Failed: {e}"
 
+# ==========================================
+# FAST SYNC: NSE API + YFINANCE BACKUP
+# ==========================================
+def perform_full_market_sync(conn, progress_callback=None):
+    try:
+        data_date = datetime.now().strftime("%Y-%m-%d")
+        sync_timestamp = datetime.now().strftime("%d %b %Y, %H:%M")
+        movers = []
+        nse_success = False
+
+        # METHOD 1: SUPER-FAST NSE API
+        if progress_callback: progress_callback("Fetching Live Nifty 500 data from NSE...")
+        try:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                "Accept": "*/*", "Accept-Language": "en-US,en;q=0.9",
+            }
+            session = requests.Session()
+            session.get("https://www.nseindia.com", headers=headers, timeout=5)
+            res = session.get("https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%20500", headers=headers, timeout=8)
+            
+            if res.status_code == 200:
+                stocks_data = res.json().get("data", [])
+                for item in stocks_data[1:]:
+                    sym = item.get("symbol")
+                    price = item.get("lastPrice", 0)
+                    pChange = item.get("pChange", 0)
+                    comp_name = item.get("meta", {}).get("companyName", sym)
+
+                    if sym and str(price).replace('.', '', 1).isdigit():
+                        movers.append({
+                            "symbol": sym, "company_name": comp_name,
+                            "price": float(price), "pct_change": float(pChange)
+                        })
+                
+                if len(movers) > 100:
+                    nse_success = True
+                    if progress_callback: progress_callback("NSE Data fetched successfully!")
+        except Exception:
+            pass 
+
+        # METHOD 2: YFINANCE BACKUP (Slower, only if NSE fails)
+        if not nse_success:
+            if progress_callback: progress_callback("NSE busy. Syncing via Yahoo Finance (Slower)...")
+            cursor = conn.cursor()
+            cursor.execute("SELECT symbol, company_name FROM stock_master")
+            db_stocks = cursor.fetchall()
+            if not db_stocks: db_stocks = FALLBACK_UNIVERSE
+            
+            tickers = [f"{s}.NS" for s, _ in db_stocks[:150]] 
+            data = yf.download(tickers=tickers, period="5d", group_by="ticker", threads=True, progress=False)
+            
+            for s, n in db_stocks[:150]:
+                ns = f"{s}.NS"
+                try:
+                    closes = data[ns]["Close"].dropna() if len(tickers) > 1 else data["Close"].dropna()
+                    if len(closes) >= 2:
+                        last_c = float(closes.iloc[-1])
+                        prev_c = float(closes.iloc[-2])
+                        pct = round((last_c - prev_c) / prev_c * 100, 2)
+                        movers.append({"symbol": s, "company_name": n, "price": round(last_c, 2), "pct_change": pct})
+                except: continue
+
+        if not movers:
+            return "Sync Failed: Internet issue or APIs blocked.", False
+
+        # UPDATE DATABASE WITH MOVERS
+        cursor = conn.cursor()
+        gainers = sorted(movers, key=lambda x: x["pct_change"], reverse=True)[:10]
+        losers = sorted(movers, key=lambda x: x["pct_change"])[:10]
+
+        cursor.execute("DELETE FROM market_movers WHERE date=?", (data_date,))
+        for rank, m in enumerate(gainers, 1):
+            cursor.execute("INSERT INTO market_movers (date, type, rank, symbol, company_name, price, pct_change) VALUES (?,?,?,?,?,?,?)",
+                           (data_date, "gainer", rank, m["symbol"], m["company_name"], m["price"], m["pct_change"]))
+        for rank, m in enumerate(losers, 1):
+            cursor.execute("INSERT INTO market_movers (date, type, rank, symbol, company_name, price, pct_change) VALUES (?,?,?,?,?,?,?)",
+                           (data_date, "loser", rank, m["symbol"], m["company_name"], m["price"], m["pct_change"]))
+
+        # Update Master stock DB
+        for m in movers:
+            cursor.execute("INSERT OR REPLACE INTO stock_master (symbol, company_name, sector, price) VALUES (?, ?, 'N/A', ?)",
+                           (m["symbol"], m["company_name"], m["price"]))
+
+        # WATCHLIST SPECIFIC UPDATE (If watchlist stock not in Nifty500)
+        cursor.execute("SELECT symbol FROM favorites")
+        fav_symbols = [row[0] for row in cursor.fetchall()]
+        movers_dict = {m["symbol"]: m for m in movers}
+
+        missing_favs = [s for s in fav_symbols if s not in movers_dict]
+        if missing_favs:
+            if progress_callback: progress_callback("Updating personal watchlist stocks...")
+            try:
+                tickers = [f"{s}.NS" for s in missing_favs]
+                fav_data = yf.download(tickers=tickers, period="5d", group_by="ticker", threads=True, progress=False)
+                for s in missing_favs:
+                    ns = f"{s}.NS"
+                    try:
+                        closes = fav_data[ns]["Close"].dropna() if len(missing_favs) > 1 else fav_data["Close"].dropna()
+                        if len(closes) >= 2:
+                            last_c = float(closes.iloc[-1])
+                            prev_c = float(closes.iloc[-2])
+                            pct = round((last_c - prev_c) / prev_c * 100, 2)
+                            movers_dict[s] = {"price": round(last_c, 2), "pct_change": pct}
+                    except: pass
+            except: pass
+
+        # Save watchlist updates
+        for symbol in fav_symbols:
+            if symbol in movers_dict:
+                m = movers_dict[symbol]
+                cursor.execute(
+                    "UPDATE favorites SET latest_price=?, change_pct=?, last_updated=? WHERE symbol=?",
+                    (m["price"], m["pct_change"], sync_timestamp, symbol),
+                )
+
+        # Update News Items
+        seen = set()
+        cursor.execute("DELETE FROM news_items WHERE date=?", (data_date,))
+        for m in (gainers + losers):
+            if m["symbol"] not in seen:
+                seen.add(m["symbol"])
+                cursor.execute("INSERT INTO news_items (symbol, company_name, date, pct_change) VALUES (?,?,?,?)",
+                               (m["symbol"], m["company_name"], data_date, m["pct_change"]))
+
+        cursor.execute("INSERT OR REPLACE INTO market_summary (date, value, sync_time) VALUES (?, ?, ?)",
+                       (data_date, gainers[0]["price"] if gainers else 0, sync_timestamp))
+        conn.commit()
+
+        status = "Live" if is_market_open() else "Closed"
+        return f"Synced ({status}) - data as of {sync_timestamp}", True
+    except Exception as e:
+        return f"Sync Error: {str(e)}", False
+
 
 # ==========================================
-# 2. MAIN APPLICATION
+# 2. MAIN APP & UI
 # ==========================================
 def main(page: ft.Page):
     page.title = "StockAI Pro"
     page.padding = 0
-
     db_conn = init_db()
 
+    # Apply saved theme
     stored_theme = get_setting(db_conn, "theme_mode", "system")
-    if stored_theme == "light":
-        page.theme_mode = ft.ThemeMode.LIGHT
-    elif stored_theme == "dark":
-        page.theme_mode = ft.ThemeMode.DARK
-    else:
-        page.theme_mode = ft.ThemeMode.SYSTEM
+    if stored_theme == "light": page.theme_mode = ft.ThemeMode.LIGHT
+    elif stored_theme == "dark": page.theme_mode = ft.ThemeMode.DARK
+    else: page.theme_mode = ft.ThemeMode.SYSTEM
+    
     page.theme = ft.Theme(color_scheme_seed="blue", use_material3=True)
-
     main_content = ft.Container(expand=True)
 
-    # ---------- SPLASH SCREEN ----------
+    # ---------- SPLASH & ERROR ----------
     splash_screen = ft.Container(
-        expand=True,
-        alignment=ft.alignment.center,
+        expand=True, alignment=ft.alignment.center,
         content=ft.Column(
             [
                 ft.Icon(Icons.SHOW_CHART, size=90, color=Colors.BLUE_700),
@@ -509,29 +374,22 @@ def main(page: ft.Page):
                 ft.Container(height=40),
                 ft.ProgressBar(width=150, color=Colors.BLUE_700),
             ],
-            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-            alignment=ft.MainAxisAlignment.CENTER,
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER, alignment=ft.MainAxisAlignment.CENTER,
         ),
     )
 
-    # ---------- ERROR SCREEN ----------
     def show_error_screen(message):
         main_content.content = ft.Container(
-            expand=True,
-            alignment=ft.alignment.center,
-            padding=20,
-            content=ft.Column(
-                [
-                    ft.Icon(Icons.ERROR_OUTLINE, size=60, color=Colors.RED),
-                    ft.Text("Something went wrong", size=20, weight=ft.FontWeight.BOLD),
-                    ft.Text(str(message), size=12, color=Colors.GREY_600, selectable=True),
-                ],
-                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-            ),
+            expand=True, alignment=ft.alignment.center, padding=20,
+            content=ft.Column([
+                ft.Icon(Icons.ERROR_OUTLINE, size=60, color=Colors.RED),
+                ft.Text("Something went wrong", size=20, weight=ft.FontWeight.BOLD),
+                ft.Text(str(message), size=12, color=Colors.GREY_600, selectable=True),
+            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
         )
         page.update()
 
-    # ---------- STOCK DETAILS PAGE ----------
+    # ---------- STOCK DETAILS PAGE (OLD FEATURE RESTORED) ----------
     def show_stock_details(symbol, company_name, sector, price):
         is_fav = any(f[0] == symbol for f in get_favorites(db_conn))
         fav_icon = ft.Icon(Icons.STAR if is_fav else Icons.STAR_BORDER)
@@ -567,8 +425,7 @@ def main(page: ft.Page):
                     )
                 ),
                 ft.ElevatedButton(
-                    "Read News on Google",
-                    icon=Icons.OPEN_IN_NEW,
+                    "Read News on Google", icon=Icons.OPEN_IN_NEW,
                     on_click=lambda e: page.launch_url(google_news_url(company_name)),
                 ),
             ]),
@@ -579,14 +436,9 @@ def main(page: ft.Page):
     # ---------- HOME SCREEN ----------
     search_input = ft.TextField(
         hint_text="Search Stock (e.g. RELIANCE, TCS)",
-        prefix_icon=Icons.SEARCH,
-        border_radius=30,
-        filled=True,
-        border_color=Colors.TRANSPARENT,
-        height=55,
-        text_size=16,
+        prefix_icon=Icons.SEARCH, border_radius=30, filled=True,
+        border_color=Colors.TRANSPARENT, height=55, text_size=16,
     )
-
     result_column = ft.Column(spacing=8)
     recent_list = ft.Column()
 
@@ -595,23 +447,11 @@ def main(page: ft.Page):
         recents = get_recent_searches(db_conn)
         if not recents:
             recent_list.controls.append(
-                ft.Container(
-                    content=ft.Row([
-                        ft.Icon(Icons.HISTORY, color=Colors.GREY_400),
-                        ft.Text("No recent searches", color=Colors.GREY_500),
-                    ]),
-                    padding=10,
-                )
+                ft.Container(content=ft.Row([ft.Icon(Icons.HISTORY, color=Colors.GREY_400), ft.Text("No recent searches", color=Colors.GREY_500)]), padding=10)
             )
         else:
             for q in recents:
-                recent_list.controls.append(
-                    ft.ListTile(
-                        leading=ft.Icon(Icons.HISTORY),
-                        title=ft.Text(q),
-                        on_click=lambda e, q=q: run_search(q),
-                    )
-                )
+                recent_list.controls.append(ft.ListTile(leading=ft.Icon(Icons.HISTORY), title=ft.Text(q), on_click=lambda e, q=q: run_search(q)))
 
     def run_search(query):
         results = search_stock_db(db_conn, query)
@@ -634,18 +474,18 @@ def main(page: ft.Page):
 
     def handle_search(e):
         query = (search_input.value or "").strip()
-        if query:
-            run_search(query)
+        if query: run_search(query)
 
     search_input.on_submit = handle_search
 
-    sync_status_text = ft.Text(get_last_sync_display(db_conn), size=12, color=Colors.GREY)
+    cursor = db_conn.cursor()
+    cursor.execute("SELECT sync_time FROM market_summary ORDER BY date DESC LIMIT 1")
+    row = cursor.fetchone()
+    sync_status_text = ft.Text(f"Last updated: {row[0]}" if row else "Not synced yet. Tap 'Update Market Data'.", size=12, color=Colors.GREY)
 
     def on_update_market_data(e):
         update_button.disabled = True
-        update_button.text = "Updating..."
-        sync_status_text.value = "Starting sync..."
-        sync_status_text.color = Colors.GREY
+        update_button.text = "Syncing..."
         page.update()
 
         def progress_callback(msg):
@@ -665,48 +505,34 @@ def main(page: ft.Page):
 
         threading.Thread(target=do_sync, daemon=True).start()
 
-    update_button = ft.ElevatedButton(
-        "Update Market Data",
-        icon=Icons.REFRESH,
-        on_click=on_update_market_data,
-        style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=15), padding=15),
-    )
+    update_button = ft.ElevatedButton("Update Market Data", icon=Icons.REFRESH, on_click=on_update_market_data, style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=15), padding=15))
 
     home_screen = ft.Container(
-        expand=True,
-        padding=20,
-        content=ft.Column(
-            [
-                ft.Container(height=20),
-                ft.Text("StockAI Pro", size=28, weight=ft.FontWeight.BOLD),
-                ft.Text("Market data ready for analysis", size=14, color=Colors.BLUE_600),
-                ft.Container(height=15),
-                update_button,
-                sync_status_text,
-                ft.Container(height=15),
-                search_input,
-                result_column,
-                ft.Container(height=30),
-                ft.Text("Recent Searches", size=18, weight=ft.FontWeight.W_700),
-                recent_list,
-            ],
-            scroll=ft.ScrollMode.AUTO,
-        ),
+        expand=True, padding=20,
+        content=ft.Column([
+            ft.Container(height=20),
+            ft.Text("StockAI Pro", size=28, weight=ft.FontWeight.BOLD),
+            ft.Text("Market data ready for analysis", size=14, color=Colors.BLUE_600),
+            ft.Container(height=15),
+            update_button,
+            sync_status_text,
+            ft.Container(height=15),
+            search_input,
+            result_column,
+            ft.Container(height=30),
+            ft.Text("Recent Searches", size=18, weight=ft.FontWeight.W_700),
+            recent_list,
+        ], scroll=ft.ScrollMode.AUTO)
     )
 
-    # ---------- NEWS SCREEN ----------
+    # ---------- NEWS SCREEN (OLD FEATURE RESTORED) ----------
     news_list = ft.Column(spacing=10)
 
     def refresh_news_screen():
         news_list.controls.clear()
         items = get_news_items(db_conn)
         if not items:
-            news_list.controls.append(
-                ft.Text(
-                    "No news yet. Tap 'Update Market Data' on Home to fetch today's top movers.",
-                    color=Colors.GREY_500,
-                )
-            )
+            news_list.controls.append(ft.Text("No news yet. Tap 'Update Market Data' on Home.", color=Colors.GREY_500))
         else:
             for symbol, company_name, date, pct_change in items:
                 up = pct_change >= 0
@@ -714,119 +540,88 @@ def main(page: ft.Page):
                     ft.Card(
                         content=ft.Container(
                             padding=15,
-                            content=ft.Column(
-                                [
-                                    ft.Row([
-                                        ft.Icon(Icons.TRENDING_UP if up else Icons.TRENDING_DOWN,
-                                                color=Colors.GREEN if up else Colors.RED),
-                                        ft.Text(
-                                            f"{symbol} {'gained' if up else 'fell'} {abs(pct_change):.2f}% today",
-                                            weight=ft.FontWeight.BOLD, size=15, expand=True,
-                                        ),
-                                    ]),
-                                    ft.Text(f"{company_name} - {date}", size=12, color=Colors.GREY_500),
-                                    ft.TextButton(
-                                        "Read on Google News",
-                                        icon=Icons.OPEN_IN_NEW,
-                                        on_click=lambda e, c=company_name: page.launch_url(google_news_url(c)),
-                                    ),
-                                ],
-                                spacing=4,
-                            ),
+                            content=ft.Column([
+                                ft.Row([
+                                    ft.Icon(Icons.TRENDING_UP if up else Icons.TRENDING_DOWN, color=Colors.GREEN if up else Colors.RED),
+                                    ft.Text(f"{symbol} {'gained' if up else 'fell'} {abs(pct_change):.2f}% today", weight=ft.FontWeight.BOLD, size=15, expand=True),
+                                ]),
+                                ft.Text(f"{company_name} - {date}", size=12, color=Colors.GREY_500),
+                                ft.TextButton("Read on Google News", icon=Icons.OPEN_IN_NEW, on_click=lambda e, c=company_name: page.launch_url(google_news_url(c))),
+                            ], spacing=4),
                         )
                     )
                 )
 
     news_screen = ft.Container(
         padding=20,
-        content=ft.Column(
-            [
-                ft.Text("Market Movers - News", size=24, weight=ft.FontWeight.BOLD),
-                ft.Text("Auto-clears after 7 days", size=12, color=Colors.GREY_500),
-                ft.Container(height=15),
-                news_list,
-            ],
-            scroll=ft.ScrollMode.AUTO,
-        ),
+        content=ft.Column([
+            ft.Text("Market Movers - News", size=24, weight=ft.FontWeight.BOLD),
+            ft.Text("Auto-clears after 7 days", size=12, color=Colors.GREY_500),
+            ft.Container(height=15),
+            news_list,
+        ], scroll=ft.ScrollMode.AUTO)
     )
 
-    # ---------- WATCHLIST SCREEN ----------
+    # ---------- WATCHLIST & SCREENER SCREEN (NEW FEATURE ADDED) ----------
     watchlist_list = ft.Column(spacing=8)
-    add_watchlist_input = ft.TextField(
-        hint_text="Type stock symbol (e.g. RELIANCE)",
-        border_radius=25,
-        filled=True,
-        height=48,
-        text_size=14,
-        expand=True,
-    )
+    screener_results = ft.Column(spacing=2)
 
-    def on_add_watchlist(e):
-        symbol = (add_watchlist_input.value or "").strip().upper()
-        if not symbol:
-            return
+    def add_from_screener(symbol, name, price):
         cursor = db_conn.cursor()
-        cursor.execute("SELECT company_name FROM stock_master WHERE symbol=?", (symbol,))
-        row = cursor.fetchone()
-        company_name = row[0] if row else symbol
-        add_to_watchlist(db_conn, symbol, company_name)
-        add_watchlist_input.value = ""
+        cursor.execute("INSERT OR REPLACE INTO favorites (symbol, company_name, latest_price) VALUES (?, ?, ?)", (symbol, name, price))
+        db_conn.commit()
+        screener_search.value = ""
+        screener_results.controls.clear()
         refresh_watchlist_list()
         page.update()
+
+    def on_screener_change(e):
+        query = screener_search.value.strip()
+        screener_results.controls.clear()
+        if len(query) >= 3:
+            results = search_stock_db(db_conn, query)
+            if results:
+                for sym, name, sec, price in results:
+                    screener_results.controls.append(
+                        ft.ListTile(
+                            leading=ft.Icon(Icons.ADD_CIRCLE_OUTLINE, color=Colors.BLUE),
+                            title=ft.Text(f"{sym} - {name}", size=14),
+                            on_click=lambda e, s=sym, n=name, p=price: add_from_screener(s, n, p)
+                        )
+                    )
+            else:
+                screener_results.controls.append(ft.Text("No valid stock found", color=Colors.RED_400, size=12))
+        page.update()
+
+    screener_search = ft.TextField(
+        hint_text="Search stock to add (min 3 chars)...",
+        prefix_icon=Icons.SEARCH, border_radius=25, height=48, text_size=14,
+        on_change=on_screener_change
+    )
 
     def refresh_watchlist_list():
         watchlist_list.controls.clear()
         favs = get_favorites_full(db_conn)
         if not favs:
-            watchlist_list.controls.append(
-                ft.Container(
-                    content=ft.Column(
-                        [
-                            ft.Icon(Icons.STAR_BORDER, size=60, color=Colors.GREY_300),
-                            ft.Text("No stocks in your watchlist yet", color=Colors.GREY_500, weight=ft.FontWeight.W_600),
-                            ft.Text("Type a symbol above and tap Add.", size=12, color=Colors.GREY_500),
-                        ],
-                        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                    ),
-                    alignment=ft.alignment.center,
-                    padding=30,
-                )
-            )
+            watchlist_list.controls.append(ft.Text("Watchlist is empty. Search above to add.", color=Colors.GREY_500))
         else:
             for symbol, company_name, price, change_pct, last_updated in favs:
                 up = (change_pct or 0) >= 0
-                pct_text = f"{change_pct:+.2f}%" if change_pct is not None else "Not synced yet"
-                price_text = f"Rs.{price:,.2f}" if price else "Not synced yet"
-
-                def make_remove(sym):
-                    def _remove(e):
-                        remove_from_watchlist(db_conn, sym)
-                        refresh_watchlist_list()
-                        page.update()
-                    return _remove
+                pct_text = f"{change_pct:+.2f}%" if change_pct is not None else "N/A"
+                price_text = f"Rs.{price:,.2f}" if price else "N/A"
 
                 watchlist_list.controls.append(
                     ft.Card(
                         content=ft.ListTile(
                             leading=ft.Icon(Icons.SHOW_CHART),
-                            title=ft.Text(f"{symbol} - {company_name}", weight=ft.FontWeight.BOLD),
-                            subtitle=ft.Text(
-                                f"{price_text}" + (f" - {last_updated}" if last_updated else "")
-                            ),
+                            title=ft.Text(symbol, weight=ft.FontWeight.BOLD),
+                            subtitle=ft.Text(f"{price_text} | {company_name}", size=12, color=Colors.GREY_400),
                             trailing=ft.Row(
                                 [
-                                    ft.Icon(
-                                        Icons.ARROW_UPWARD if up else Icons.ARROW_DOWNWARD,
-                                        color=Colors.GREEN if up else Colors.RED, size=16,
-                                    ) if change_pct is not None else ft.Container(),
-                                    ft.Text(
-                                        pct_text,
-                                        color=Colors.GREEN if up else Colors.RED if change_pct is not None else Colors.GREY_500,
-                                        weight=ft.FontWeight.W_600,
-                                    ),
-                                    ft.IconButton(Icons.CLOSE, icon_size=16, on_click=make_remove(symbol)),
-                                ],
-                                tight=True,
+                                    ft.Text(pct_text, color=Colors.GREEN if up else Colors.RED, weight=ft.FontWeight.BOLD),
+                                    ft.IconButton(Icons.DELETE_OUTLINE, icon_color=Colors.RED_300, 
+                                                  on_click=lambda e, s=symbol: [cursor.execute("DELETE FROM favorites WHERE symbol=?", (s,)), db_conn.commit(), refresh_watchlist_list(), page.update()]),
+                                ], tight=True
                             ),
                         )
                     )
@@ -837,116 +632,54 @@ def main(page: ft.Page):
         content=ft.Column(
             [
                 ft.Text("My Watchlist", size=24, weight=ft.FontWeight.BOLD),
-                ft.Text("Updates only when you tap 'Update Market Data' on Home", size=12, color=Colors.GREY_500),
-                ft.Container(height=15),
-                ft.Row([add_watchlist_input, ft.IconButton(Icons.ADD_CIRCLE, icon_color=Colors.BLUE_700, on_click=on_add_watchlist)]),
-                ft.Container(height=15),
+                ft.Text("Smart Search enabled (prevents fake entries)", size=12, color=Colors.GREY_500),
+                screener_search,
+                screener_results,
+                ft.Divider(height=20),
                 watchlist_list,
-            ],
-            scroll=ft.ScrollMode.AUTO,
+            ], scroll=ft.ScrollMode.AUTO,
         ),
     )
 
     # ---------- ANALYTICS SCREEN ----------
-    def build_mover_row(rank, symbol, company_name, price, pct_change):
-        up = pct_change >= 0
-        return ft.Container(
-            padding=ft.padding.symmetric(horizontal=10, vertical=8),
-            content=ft.Row(
-                [
-                    ft.Container(
-                        content=ft.Text(str(rank), size=12, weight=ft.FontWeight.BOLD, color=Colors.WHITE),
-                        bgcolor=Colors.BLUE_GREY_400,
-                        width=24, height=24, border_radius=12,
-                        alignment=ft.alignment.center,
-                    ),
-                    ft.Column(
-                        [
-                            ft.Text(symbol, weight=ft.FontWeight.BOLD, size=14),
-                            ft.Text(company_name, size=11, color=Colors.GREY_500),
-                        ],
-                        spacing=0, expand=True,
-                    ),
-                    ft.Column(
-                        [
-                            ft.Text(f"Rs.{price:,.2f}", size=13, weight=ft.FontWeight.W_600),
-                            ft.Row(
-                                [
-                                    ft.Icon(
-                                        Icons.ARROW_UPWARD if up else Icons.ARROW_DOWNWARD,
-                                        size=12, color=Colors.GREEN if up else Colors.RED,
-                                    ),
-                                    ft.Text(f"{pct_change:+.2f}%", size=12,
-                                            color=Colors.GREEN if up else Colors.RED,
-                                            weight=ft.FontWeight.W_600),
-                                ],
-                                spacing=2,
-                            ),
-                        ],
-                        horizontal_alignment=ft.CrossAxisAlignment.END, spacing=2,
-                    ),
-                ],
-                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                spacing=10,
-            ),
-        )
-
-    def build_mover_section(title, icon, accent_color, rows):
-        body = ft.Column(spacing=2)
-        if not rows:
-            body.controls.append(
-                ft.Text("No data yet. Tap 'Update Market Data' on Home.", color=Colors.GREY_500, size=12)
-            )
-        else:
-            for i, row in enumerate(rows):
-                rank, symbol, company_name, price, pct_change = row
-                body.controls.append(build_mover_row(rank, symbol, company_name, price, pct_change))
-                if i < len(rows) - 1:
-                    body.controls.append(ft.Divider(height=1))
-        return ft.Card(
-            content=ft.Container(
-                padding=15,
-                content=ft.Column(
-                    [
-                        ft.Row([ft.Icon(icon, color=accent_color), ft.Text(title, size=17, weight=ft.FontWeight.BOLD, color=accent_color)]),
-                        ft.Divider(),
-                        body,
-                    ]
-                ),
-            )
-        )
-
-    analytics_date_text = ft.Text("No data synced yet", size=13, color=Colors.GREY_500)
     analytics_content = ft.Column(spacing=15)
+    analytics_date_text = ft.Text("No data", size=13, color=Colors.GREY_500)
 
     def refresh_analytics_screen():
         gainers, date1 = get_market_movers(db_conn, "gainer")
         losers, date2 = get_market_movers(db_conn, "loser")
-        data_date = date1 or date2
-        analytics_date_text.value = f"Data as of: {data_date} (Nifty 500)" if data_date else "No data synced yet"
-
+        
+        analytics_date_text.value = f"Data Date: {date1 or 'None'}"
         analytics_content.controls.clear()
-        analytics_content.controls.append(
-            build_mover_section("Top 10 Gainers", Icons.TRENDING_UP, Colors.GREEN, gainers)
-        )
-        analytics_content.controls.append(
-            build_mover_section("Top 10 Losers", Icons.TRENDING_DOWN, Colors.RED, losers)
-        )
+
+        for title, data, color, icon in [("Top 10 Gainers", gainers, Colors.GREEN, Icons.TRENDING_UP), 
+                                         ("Top 10 Losers", losers, Colors.RED, Icons.TRENDING_DOWN)]:
+            rows = ft.Column(spacing=2)
+            for rank, symbol, comp, price, pct in data:
+                rows.controls.append(
+                    ft.ListTile(
+                        leading=ft.Text(f"#{rank}", color=color, weight=ft.FontWeight.BOLD),
+                        title=ft.Text(symbol, weight=ft.FontWeight.BOLD),
+                        subtitle=ft.Text(f"Rs.{price:,.2f}"),
+                        trailing=ft.Text(f"{pct:+.2f}%", color=color, weight=ft.FontWeight.BOLD)
+                    )
+                )
+            analytics_content.controls.append(
+                ft.Card(content=ft.Container(padding=10, content=ft.Column([
+                    ft.Row([ft.Icon(icon, color=color), ft.Text(title, size=18, weight=ft.FontWeight.BOLD)]), rows
+                ])))
+            )
 
     analytics_screen = ft.Container(
         padding=20,
-        content=ft.Column(
-            [
-                ft.Text("Analytics Dashboard", size=24, weight=ft.FontWeight.BOLD),
-                analytics_date_text,
-                ft.Container(height=10),
-                analytics_content,
-            ],
-            scroll=ft.ScrollMode.AUTO,
-        ),
+        content=ft.Column([
+            ft.Text("Market Analytics", size=24, weight=ft.FontWeight.BOLD),
+            analytics_date_text,
+            analytics_content,
+        ], scroll=ft.ScrollMode.AUTO)
     )
 
-    # ---------- SETTINGS SCREEN ----------
+    # ---------- SETTINGS SCREEN (OLD FEATURE RESTORED) ----------
     status_text = ft.Text("")
 
     def on_backup(e):
@@ -961,17 +694,13 @@ def main(page: ft.Page):
     def on_theme_change(e):
         val = theme_dropdown.value
         set_setting(db_conn, "theme_mode", val)
-        if val == "light":
-            page.theme_mode = ft.ThemeMode.LIGHT
-        elif val == "dark":
-            page.theme_mode = ft.ThemeMode.DARK
-        else:
-            page.theme_mode = ft.ThemeMode.SYSTEM
+        if val == "light": page.theme_mode = ft.ThemeMode.LIGHT
+        elif val == "dark": page.theme_mode = ft.ThemeMode.DARK
+        else: page.theme_mode = ft.ThemeMode.SYSTEM
         page.update()
 
     theme_dropdown = ft.Dropdown(
-        label="App Theme",
-        value=stored_theme,
+        label="App Theme", value=stored_theme,
         options=[
             ft.dropdown.Option("system", "System Default"),
             ft.dropdown.Option("light", "Light"),
@@ -999,32 +728,27 @@ def main(page: ft.Page):
                 ft.Container(height=20),
                 ft.Text("App Info", size=18, weight=ft.FontWeight.W_600),
                 ft.Card(content=ft.Container(padding=15, content=ft.Column([
-                    ft.Text("Version: 1.0.0 (StockAI Pro)"),
+                    ft.Text("Version: 2.0 (Fast NSE Sync + Screener)"),
                     ft.Text("Database: Local SQLite"),
-                    ft.Text("Data source: Yahoo Finance (yfinance) + NSE Nifty 500 list"),
+                    ft.Text("Data source: NSE API + Yahoo Finance Fallback"),
                 ]))),
-            ],
-            scroll=ft.ScrollMode.AUTO,
+            ], scroll=ft.ScrollMode.AUTO,
         ),
     )
 
-    # ---------- BOTTOM NAVIGATION ----------
+    # ---------- BOTTOM NAV ----------
     screens = [home_screen, news_screen, watchlist_screen, analytics_screen, settings_screen]
 
     def change_tab(e):
         idx = e.control.selected_index
-        if idx == 1:
-            refresh_news_screen()
-        elif idx == 2:
-            refresh_watchlist_list()
-        elif idx == 3:
-            refresh_analytics_screen()
+        if idx == 1: refresh_news_screen()
+        elif idx == 2: refresh_watchlist_list()
+        elif idx == 3: refresh_analytics_screen()
         main_content.content = screens[idx]
         page.update()
 
     bottom_nav = ft.NavigationBar(
-        selected_index=0,
-        on_change=change_tab,
+        selected_index=0, on_change=change_tab,
         destinations=[
             ft.NavigationBarDestination(icon=Icons.HOME_OUTLINED, selected_icon=Icons.HOME, label="Home"),
             ft.NavigationBarDestination(icon=Icons.ARTICLE_OUTLINED, selected_icon=Icons.ARTICLE, label="News"),
@@ -1034,27 +758,13 @@ def main(page: ft.Page):
         ],
     )
 
-    # ---------- PASSWORD LOCK SCREEN ----------
-    APP_PASSWORD = "8707352902"
-
-    password_input = ft.TextField(
-        hint_text="Enter Password",
-        password=True,
-        can_reveal_password=True,
-        border_radius=30,
-        filled=True,
-        border_color=Colors.TRANSPARENT,
-        height=55,
-        text_align=ft.TextAlign.CENTER,
-        width=260,
-    )
-    password_error = ft.Text("", color=Colors.RED, size=13)
-
+    # ---------- BACKGROUND SYNC (OLD FEATURE RESTORED) ----------
     def background_auto_sync():
         try:
             last_sync = get_setting(db_conn, "last_auto_sync_date")
             now = datetime.now()
             today_str = now.strftime("%Y-%m-%d")
+            # Auto sync logic after 16:00 (Market close)
             if now.hour >= 16 and last_sync != today_str:
                 def progress_callback(msg):
                     sync_status_text.value = msg
@@ -1071,6 +781,15 @@ def main(page: ft.Page):
                 page.update()
         except Exception:
             pass
+
+    # ---------- PASSWORD LOCK SCREEN (OLD FEATURE RESTORED) ----------
+    APP_PASSWORD = "8707352902"
+    password_input = ft.TextField(
+        hint_text="Enter Password", password=True, can_reveal_password=True,
+        border_radius=30, filled=True, border_color=Colors.TRANSPARENT,
+        height=55, text_align=ft.TextAlign.CENTER, width=260,
+    )
+    password_error = ft.Text("", color=Colors.RED, size=13)
 
     def load_home():
         try:
@@ -1100,8 +819,7 @@ def main(page: ft.Page):
     password_input.on_submit = check_password
 
     password_screen = ft.Container(
-        expand=True,
-        alignment=ft.alignment.center,
+        expand=True, alignment=ft.alignment.center,
         content=ft.Column(
             [
                 ft.Icon(Icons.LOCK, size=70, color=Colors.BLUE_700),
@@ -1113,16 +831,13 @@ def main(page: ft.Page):
                 ft.ElevatedButton("OK", on_click=check_password, width=260),
                 ft.Container(height=8),
                 password_error,
-            ],
-            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-            alignment=ft.MainAxisAlignment.CENTER,
+            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, alignment=ft.MainAxisAlignment.CENTER,
         ),
     )
 
-    # ---------- INITIAL RENDER: PASSWORD FIRST ----------
+    # ---------- INITIAL RENDER ----------
     main_content.content = password_screen
     page.add(main_content)
-
 
 if __name__ == "__main__":
     ft.app(target=main)
