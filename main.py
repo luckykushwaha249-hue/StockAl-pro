@@ -939,32 +939,45 @@ def main(page: ft.Page):
         else:
             for symbol, company_name, date, pct_change in items:
                 up = pct_change >= 0
+                color = Colors.GREEN if up else Colors.RED
                 news_list.controls.append(
-                    ft.Card(
-                        content=ft.Container(
-                            padding=15,
-                            content=ft.Column(
-                                [
-                                    ft.Row([
-                                        ft.Icon(Icons.TRENDING_UP if up else Icons.TRENDING_DOWN,
-                                                color=Colors.GREEN if up else Colors.RED),
-                                        ft.Text(
-                                            f"{symbol} {'gained' if up else 'fell'} {abs(pct_change):.2f}% today",
-                                            weight=ft.FontWeight.BOLD, size=15, expand=True,
+                    ft.Container(
+                        padding=15,
+                        border_radius=12,
+                        border=ft.border.all(1, Colors.GREY_300),
+                        content=ft.Column(
+                            [
+                                ft.Row(
+                                    [
+                                        ft.Column(
+                                            [
+                                                ft.Text(symbol, weight=ft.FontWeight.BOLD, size=15),
+                                                ft.Text(company_name, size=11, color=Colors.GREY_500),
+                                            ],
+                                            spacing=0, expand=True,
                                         ),
-                                    ]),
-                                    ft.Text(f"{company_name} - {date}", size=12, color=Colors.GREY_500),
-                                    ft.TextButton(
-                                        "Read on Google News",
-                                        icon=Icons.OPEN_IN_NEW,
-                                        on_click=lambda e, c=company_name: page.launch_url(google_news_url(c)),
-                                    ),
-                                ],
-                                spacing=4,
-                            ),
-                        )
+                                        ft.Text(f"{pct_change:+.2f}%", size=16, weight=ft.FontWeight.BOLD, color=color),
+                                    ],
+                                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                                ),
+                                ft.Text(date, size=11, color=Colors.GREY_400),
+                                ft.Row(
+                                    [
+                                        ft.TextButton(
+                                            "News",
+                                            icon=Icons.OPEN_IN_NEW,
+                                            icon_color=Colors.BLUE_700,
+                                            on_click=lambda e, c=company_name: page.launch_url(google_news_url(c)),
+                                        ),
+                                    ],
+                                    alignment=ft.MainAxisAlignment.END,
+                                ),
+                            ],
+                            spacing=2,
+                        ),
                     )
                 )
+                news_list.controls.append(ft.Container(height=8))
 
     news_screen = ft.Container(
         padding=20,
@@ -980,28 +993,49 @@ def main(page: ft.Page):
     )
 
     # ---------- WATCHLIST SCREEN ----------
-    watchlist_list = ft.Column(spacing=8)
+    watchlist_list = ft.Column(spacing=0)
+    watchlist_search_results = ft.Column(spacing=0)
+
+    def on_add_stock_search(e):
+        query = (add_watchlist_input.value or "").strip()
+        watchlist_search_results.controls.clear()
+        if len(query) >= 2:
+            results = search_stock_db(db_conn, query)
+            if results:
+                for symbol, company_name, sector, price in results[:8]:
+                    def make_add(sym, name):
+                        def _add(e):
+                            add_to_watchlist(db_conn, sym, name)
+                            add_watchlist_input.value = ""
+                            watchlist_search_results.controls.clear()
+                            refresh_watchlist_list()
+                            page.update()
+                        return _add
+
+                    watchlist_search_results.controls.append(
+                        ft.ListTile(
+                            leading=ft.Icon(Icons.ADD_CIRCLE_OUTLINE, color=Colors.BLUE_700),
+                            title=ft.Text(symbol, weight=ft.FontWeight.BOLD, size=14),
+                            subtitle=ft.Text(company_name, size=12),
+                            on_click=make_add(symbol, company_name),
+                            dense=True,
+                        )
+                    )
+            else:
+                watchlist_search_results.controls.append(
+                    ft.Container(padding=10, content=ft.Text("No matches found", size=12, color=Colors.GREY_500))
+                )
+        page.update()
+
     add_watchlist_input = ft.TextField(
-        hint_text="Type stock symbol (e.g. RELIANCE)",
+        hint_text="Type stock name or symbol (e.g. TATA, Reliance)",
+        prefix_icon=Icons.SEARCH,
         border_radius=25,
         filled=True,
         height=48,
         text_size=14,
-        expand=True,
+        on_change=on_add_stock_search,
     )
-
-    def on_add_watchlist(e):
-        symbol = (add_watchlist_input.value or "").strip().upper()
-        if not symbol:
-            return
-        cursor = db_conn.cursor()
-        cursor.execute("SELECT company_name FROM stock_master WHERE symbol=?", (symbol,))
-        row = cursor.fetchone()
-        company_name = row[0] if row else symbol
-        add_to_watchlist(db_conn, symbol, company_name)
-        add_watchlist_input.value = ""
-        refresh_watchlist_list()
-        page.update()
 
     def refresh_watchlist_list():
         watchlist_list.controls.clear()
@@ -1013,7 +1047,7 @@ def main(page: ft.Page):
                         [
                             ft.Icon(Icons.STAR_BORDER, size=60, color=Colors.GREY_300),
                             ft.Text("No stocks in your watchlist yet", color=Colors.GREY_500, weight=ft.FontWeight.W_600),
-                            ft.Text("Type a symbol above and tap Add.", size=12, color=Colors.GREY_500),
+                            ft.Text("Search a stock above and tap it to add.", size=12, color=Colors.GREY_500),
                         ],
                         horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                     ),
@@ -1023,9 +1057,6 @@ def main(page: ft.Page):
             )
         else:
             for symbol, company_name, price, change_pct, last_updated in favs:
-                up = (change_pct or 0) >= 0
-                pct_text = f"{change_pct:+.2f}%" if change_pct is not None else "Not synced yet"
-                price_text = f"Rs.{price:,.2f}" if price else "Not synced yet"
 
                 def make_remove(sym):
                     def _remove(e):
@@ -1034,32 +1065,47 @@ def main(page: ft.Page):
                         page.update()
                     return _remove
 
-                watchlist_list.controls.append(
-                    ft.Card(
-                        content=ft.ListTile(
-                            leading=ft.Icon(Icons.SHOW_CHART),
-                            title=ft.Text(f"{symbol} - {company_name}", weight=ft.FontWeight.BOLD),
-                            subtitle=ft.Text(
-                                f"{price_text}" + (f" - {last_updated}" if last_updated else "")
-                            ),
-                            trailing=ft.Row(
+                if price and change_pct is not None:
+                    up = change_pct >= 0
+                    color = Colors.GREEN if up else Colors.RED
+                    prev_price = price / (1 + change_pct / 100) if (100 + change_pct) != 0 else price
+                    change_amount = price - prev_price
+                    right_block = ft.Column(
+                        [
+                            ft.Text(f"Rs.{price:,.2f}", size=15, weight=ft.FontWeight.BOLD),
+                            ft.Row(
                                 [
-                                    ft.Icon(
-                                        Icons.ARROW_UPWARD if up else Icons.ARROW_DOWNWARD,
-                                        color=Colors.GREEN if up else Colors.RED, size=16,
-                                    ) if change_pct is not None else ft.Container(),
-                                    ft.Text(
-                                        pct_text,
-                                        color=Colors.GREEN if up else Colors.RED if change_pct is not None else Colors.GREY_500,
-                                        weight=ft.FontWeight.W_600,
-                                    ),
-                                    ft.IconButton(Icons.CLOSE, icon_size=16, on_click=make_remove(symbol)),
+                                    ft.Icon(Icons.ARROW_UPWARD if up else Icons.ARROW_DOWNWARD, size=12, color=color),
+                                    ft.Text(f"{change_amount:+,.2f} ({change_pct:+.2f}%)", size=12, color=color, weight=ft.FontWeight.W_600),
                                 ],
-                                tight=True,
+                                spacing=2,
                             ),
-                        )
+                        ],
+                        horizontal_alignment=ft.CrossAxisAlignment.END, spacing=2,
+                    )
+                else:
+                    right_block = ft.Text("Not synced yet", size=12, color=Colors.GREY_500)
+
+                watchlist_list.controls.append(
+                    ft.Container(
+                        padding=ft.padding.symmetric(horizontal=6, vertical=12),
+                        content=ft.Row(
+                            [
+                                ft.Column(
+                                    [
+                                        ft.Text(symbol, weight=ft.FontWeight.BOLD, size=15),
+                                        ft.Text(company_name, size=11, color=Colors.GREY_500),
+                                    ],
+                                    spacing=0, expand=True,
+                                ),
+                                right_block,
+                                ft.IconButton(Icons.CLOSE, icon_size=16, on_click=make_remove(symbol)),
+                            ],
+                            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                        ),
                     )
                 )
+                watchlist_list.controls.append(ft.Divider(height=1))
 
     watchlist_screen = ft.Container(
         padding=20,
@@ -1068,9 +1114,10 @@ def main(page: ft.Page):
                 ft.Text("My Watchlist", size=24, weight=ft.FontWeight.BOLD),
                 ft.Text("Updates only when you tap 'Update Market Data' on Home", size=12, color=Colors.GREY_500),
                 ft.Container(height=15),
-                ft.Row([add_watchlist_input, ft.IconButton(Icons.ADD_CIRCLE, icon_color=Colors.BLUE_700, on_click=on_add_watchlist)]),
+                add_watchlist_input,
+                watchlist_search_results,
                 ft.Container(height=15),
-                watchlist_list,
+                ft.Card(content=ft.Container(padding=10, content=watchlist_list)),
             ],
             scroll=ft.ScrollMode.AUTO,
         ),
@@ -1132,44 +1179,65 @@ def main(page: ft.Page):
                 body.controls.append(build_mover_row(rank, symbol, company_name, price, pct_change))
                 if i < len(rows) - 1:
                     body.controls.append(ft.Divider(height=1))
-        return ft.Card(
-            content=ft.Container(
-                padding=15,
-                content=ft.Column(
-                    [
-                        ft.Row([ft.Icon(icon, color=accent_color), ft.Text(title, size=17, weight=ft.FontWeight.BOLD, color=accent_color)]),
-                        ft.Divider(),
-                        body,
-                    ]
-                ),
-            )
+        return body
+
+    mover_state = {"selected": "gainer"}
+    analytics_date_text = ft.Text("No data synced yet", size=13, color=Colors.GREY_500)
+    analytics_list_body = ft.Column(spacing=2)
+
+    def render_mover_list():
+        mtype = mover_state["selected"]
+        rows, data_date = get_market_movers(db_conn, mtype)
+        analytics_date_text.value = f"Date: {data_date}" if data_date else "No data synced yet"
+        analytics_list_body.controls.clear()
+        analytics_list_body.controls.append(
+            build_mover_section("", None, Colors.GREEN if mtype == "gainer" else Colors.RED, rows)
         )
 
-    analytics_date_text = ft.Text("No data synced yet", size=13, color=Colors.GREY_500)
-    analytics_content = ft.Column(spacing=15)
+    def select_gainers(e):
+        mover_state["selected"] = "gainer"
+        gainer_btn.bgcolor = Colors.GREEN
+        gainer_btn.color = Colors.WHITE
+        loser_btn.bgcolor = Colors.GREY_200
+        loser_btn.color = Colors.BLACK
+        render_mover_list()
+        page.update()
+
+    def select_losers(e):
+        mover_state["selected"] = "loser"
+        loser_btn.bgcolor = Colors.RED
+        loser_btn.color = Colors.WHITE
+        gainer_btn.bgcolor = Colors.GREY_200
+        gainer_btn.color = Colors.BLACK
+        render_mover_list()
+        page.update()
+
+    gainer_btn = ft.ElevatedButton("Top 10 Gainers", bgcolor=Colors.GREEN, color=Colors.WHITE, on_click=select_gainers, expand=True)
+    loser_btn = ft.ElevatedButton("Top 10 Losers", bgcolor=Colors.GREY_200, color=Colors.BLACK, on_click=select_losers, expand=True)
 
     def refresh_analytics_screen():
-        gainers, date1 = get_market_movers(db_conn, "gainer")
-        losers, date2 = get_market_movers(db_conn, "loser")
-        data_date = date1 or date2
-        analytics_date_text.value = f"Data as of: {data_date} (Nifty 500)" if data_date else "No data synced yet"
-
-        analytics_content.controls.clear()
-        analytics_content.controls.append(
-            build_mover_section("Top 10 Gainers", Icons.TRENDING_UP, Colors.GREEN, gainers)
-        )
-        analytics_content.controls.append(
-            build_mover_section("Top 10 Losers", Icons.TRENDING_DOWN, Colors.RED, losers)
-        )
+        render_mover_list()
 
     analytics_screen = ft.Container(
         padding=20,
         content=ft.Column(
             [
                 ft.Text("Analytics Dashboard", size=24, weight=ft.FontWeight.BOLD),
-                analytics_date_text,
                 ft.Container(height=10),
-                analytics_content,
+                ft.Card(
+                    content=ft.Container(
+                        padding=15,
+                        content=ft.Column(
+                            [
+                                analytics_date_text,
+                                ft.Container(height=10),
+                                ft.Row([gainer_btn, loser_btn], spacing=10),
+                                ft.Divider(),
+                                analytics_list_body,
+                            ]
+                        ),
+                    )
+                ),
             ],
             scroll=ft.ScrollMode.AUTO,
         ),
