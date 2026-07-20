@@ -326,7 +326,7 @@ def perform_full_market_sync(conn, progress_callback=None):
 
         movers = []
         data_date = None
-        batch_size = 100
+        batch_size = 250
         for i in range(0, len(tickers), batch_size):
             batch = tickers[i:i + batch_size]
             try:
@@ -337,7 +337,10 @@ def perform_full_market_sync(conn, progress_callback=None):
             for ns_symbol in batch:
                 symbol = ns_symbol.replace(".NS", "")
                 try:
-                    closes = data[ns_symbol]["Close"].dropna()
+                    try:
+                        closes = data[ns_symbol]["Close"].dropna()
+                    except Exception:
+                        closes = data["Close"][ns_symbol].dropna()
                     if len(closes) < 2:
                         continue
                     last_close = float(closes.iloc[-1])
@@ -358,6 +361,7 @@ def perform_full_market_sync(conn, progress_callback=None):
 
             if progress_callback:
                 progress_callback(f"Processed {min(i + batch_size, len(tickers))}/{len(tickers)} stocks...")
+            time.sleep(0.2)
 
         if not movers or data_date is None:
             return "Sync Failed: No data received (check internet connection)", False
@@ -401,7 +405,13 @@ def perform_full_market_sync(conn, progress_callback=None):
                 for s in missing_fav_symbols:
                     ns = f"{s}.NS"
                     try:
-                        closes = fav_data[ns]["Close"].dropna() if len(missing_fav_symbols) > 1 else fav_data["Close"].dropna()
+                        if len(missing_fav_symbols) > 1:
+                            try:
+                                closes = fav_data[ns]["Close"].dropna()
+                            except Exception:
+                                closes = fav_data["Close"][ns].dropna()
+                        else:
+                            closes = fav_data["Close"].dropna()
                         if len(closes) >= 2:
                             last_close = float(closes.iloc[-1])
                             prev_close = float(closes.iloc[-2])
