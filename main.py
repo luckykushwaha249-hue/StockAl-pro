@@ -1218,47 +1218,48 @@ def main(page: ft.Page):
                     change_amount = price - prev_price
                     right_block = ft.Column(
                         [
-                            ft.Text(f"Rs.{price:,.2f}", size=15, weight=ft.FontWeight.BOLD),
+                            ft.Text(f"{price:,.2f}", size=15, weight=ft.FontWeight.W_700),
                             ft.Row(
                                 [
-                                    ft.Icon(Icons.ARROW_UPWARD if up else Icons.ARROW_DOWNWARD, size=12, color=color),
+                                    ft.Icon(Icons.ARROW_UPWARD if up else Icons.ARROW_DOWNWARD, size=11, color=color),
                                     ft.Text(f"{change_amount:+,.2f} ({change_pct:+.2f}%)", size=12, color=color, weight=ft.FontWeight.W_600),
                                 ],
-                                spacing=2,
+                                spacing=2, tight=True,
                             ),
                         ],
-                        horizontal_alignment=ft.CrossAxisAlignment.END, spacing=2,
+                        horizontal_alignment=ft.CrossAxisAlignment.END, spacing=2, tight=True,
                     )
                 else:
-                    right_block = ft.Text("Not synced yet", size=12, color=Colors.GREY_500)
+                    right_block = ft.Text("--", size=13, color=Colors.GREY_500)
 
+                # TradingView-style compact row: avatar + symbol/name on the
+                # left, price/change on the right, single line, no clutter.
+                # Tap the row to open full details (copy + news live there).
                 watchlist_list.controls.append(
                     ft.Container(
-                        padding=ft.padding.symmetric(horizontal=6, vertical=12),
+                        padding=ft.padding.symmetric(horizontal=8, vertical=10),
+                        on_click=lambda e, s=symbol, c=company_name, p=price: show_stock_details(s, c, "N/A", p or 0),
                         content=ft.Row(
                             [
+                                ft.CircleAvatar(
+                                    content=ft.Text(symbol[0] if symbol else "?", size=14, weight=ft.FontWeight.BOLD),
+                                    radius=17,
+                                    bgcolor=Colors.BLUE_GREY_700,
+                                    color=Colors.WHITE,
+                                ),
                                 ft.Column(
                                     [
-                                        ft.Text(symbol, weight=ft.FontWeight.BOLD, size=15),
-                                        ft.Text(company_name, size=11, color=Colors.GREY_500),
+                                        ft.Text(symbol, weight=ft.FontWeight.BOLD, size=14, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                                        ft.Text(company_name, size=11, color=Colors.GREY_500, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
                                     ],
-                                    spacing=0, expand=True,
+                                    spacing=0, expand=True, tight=True,
                                 ),
                                 right_block,
-                                ft.IconButton(
-                                    Icons.COPY, icon_size=16,
-                                    tooltip="Copy",
-                                    on_click=lambda e, s=symbol, p=price: copy_to_clipboard(
-                                        f"{s} - Rs.{p:,.2f}" if p else s, "Stock"),
-                                ),
-                                ft.IconButton(
-                                    Icons.OPEN_IN_NEW, icon_size=16,
-                                    tooltip="News",
-                                    on_click=lambda e, c=company_name: page.launch_url(google_news_url(c)),
-                                ),
-                                ft.IconButton(Icons.CLOSE, icon_size=16, on_click=make_remove(symbol)),
+                                ft.IconButton(Icons.CLOSE, icon_size=15, on_click=make_remove(symbol)),
                             ],
                             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                            spacing=8,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
                         ),
                     )
                 )
