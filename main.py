@@ -20,12 +20,11 @@ try:
 except AttributeError:
     Colors = ft.colors
 
-
 # ==========================================
 # FALLBACK STOCK LIST
-# Used only if the live Nifty 500 fetch (and the cache) both fail,
-# e.g. on the very first run with no internet. This keeps the app
-# usable even when the full list can't be downloaded.
+# Used only if EVERY live fetch (NSE full list, NSE Nifty500 list, and
+# both caches) fails - e.g. the very first run with no internet at all.
+# This keeps the app usable even when nothing can be downloaded.
 # ==========================================
 FALLBACK_UNIVERSE = [
     ("RELIANCE", "Reliance Industries"), ("TCS", "Tata Consultancy Services"),
@@ -45,8 +44,14 @@ FALLBACK_UNIVERSE = [
     ("SHRIRAMFIN", "Shriram Finance"), ("TATACONSUM", "Tata Consumer Products"), ("TECHM", "Tech Mahindra"),
     ("TRENT", "Trent Ltd"), ("HEROMOTOCO", "Hero MotoCorp"), ("APOLLOHOSP", "Apollo Hospitals"),
     ("BAJAJ-AUTO", "Bajaj Auto"), ("BEL", "Bharat Electronics"), ("JIOFIN", "Jio Financial Services"),
+    ("RELAXO", "Relaxo Footwears"),
 ]
 
+NSE_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    "Accept": "text/csv,application/csv,*/*",
+}
 
 # ==========================================
 # 1. DATABASE SETUP
@@ -99,6 +104,12 @@ def init_db():
                         key TEXT PRIMARY KEY,
                         value TEXT)''')
 
+    # Full NSE universe (~2000 stocks) - replaces the old Nifty500-only cache
+    cursor.execute('''CREATE TABLE IF NOT EXISTS nse_universe_cache (
+                        symbol TEXT PRIMARY KEY,
+                        company_name TEXT)''')
+
+    # Kept for backward-compatible fallback (smaller Nifty500 list)
     cursor.execute('''CREATE TABLE IF NOT EXISTS nifty500_cache (
                         symbol TEXT PRIMARY KEY,
                         company_name TEXT)''')
@@ -107,10 +118,16 @@ def init_db():
                         symbol TEXT PRIMARY KEY,
                         security_id TEXT)''')
 
-    # Safe migration: add new columns to favorites if they don't exist yet
+    # Safe migration: add new columns if they don't exist yet
     for coldef in ("change_pct REAL", "last_updated TEXT"):
         try:
             cursor.execute(f"ALTER TABLE favorites ADD COLUMN {coldef}")
+        except Exception:
+            pass
+
+    for coldef in ("market_cap REAL DEFAULT 0",):
+        try:
+            cursor.execute(f"ALTER TABLE stock_master ADD COLUMN {coldef}")
         except Exception:
             pass
 
@@ -137,29 +154,18 @@ def set_setting(conn, key, value):
 
 
 # ==========================================
-# NIFTY 500 UNIVERSE (fetched live, cached, with fallback)
+# FULL NSE MARKET UNIVERSE (~2000 stocks, fetched live, cached, with fallback)
 # ==========================================
-def fetch_nifty500_universe(conn):
-    """
-    Tries to download the official Nifty 500 constituent list from NSE.
-    On success, caches it to the database and updates stock_master.
-    On failure, uses whatever was cached from a previous successful run.
-    If there is no cache either (e.g. very first run, no internet),
-    falls back to a smaller fixed list of well-known large-cap stocks.
-    Returns a list of (symbol, company_name) tuples.
-    """
+def _fetch_nifty500_only(conn):
+    """Smaller backup list (~500 stocks) - used only if the full ~2000
+    stock equity list can't be reached but the Nifty500 endpoint can."""
     cursor = conn.cursor()
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                          "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-            "Accept": "text/csv,application/csv,*/*",
-        }
         session = requests.Session()
-        session.get("https://www.nseindia.com", headers=headers, timeout=10)
+        session.get("https://www.nseindia.com", headers=NSE_HEADERS, timeout=10)
         resp = session.get(
             "https://nsearchives.nseindia.com/content/indices/ind_nifty500list.csv",
-            headers=headers, timeout=15,
+            headers=NSE_HEADERS, timeout=15,
         )
         resp.raise_for_status()
         lines = resp.text.strip().split("\n")[1:]
@@ -171,8 +177,7 @@ def fetch_nifty500_universe(conn):
         if len(symbols) >= 100:
             cursor.execute("DELETE FROM nifty500_cache")
             cursor.executemany(
-                "INSERT OR REPLACE INTO nifty500_cache (symbol, company_name) VALUES (?, ?)",
-                symbols,
+                "INSERT OR REPLACE INTO nifty500_cache (symbol, company_name) VALUES (?, ?)", symbols,
             )
             cursor.executemany(
                 "INSERT OR IGNORE INTO stock_master (symbol, company_name, sector, price) VALUES (?, ?, 'N/A', 0.0)",
@@ -182,22 +187,138 @@ def fetch_nifty500_universe(conn):
             return symbols
     except Exception:
         pass
+    return None
 
-    # Fall back to cache from a previous successful fetch
-    cursor.execute("SELECT symbol, company_name FROM nifty500_cache")
+
+def fetch_full_market_universe(conn, progress_callback=None):
+    """
+    Builds the complete searchable stock universe (all NSE main-board
+    equities - roughly 2000 stocks, not just the Nifty 500). This is
+    what makes ANY stock searchable/addable to the watchlist, not just
+    large caps.
+
+    Order of attempts:
+      1. NSE's official full equity list (EQUITY_L.csv) -> ~2000 stocks
+      2. NSE Nifty 500 list (smaller backup, in case the full list URL
+         is temporarily blocked)
+      3. Whatever was cached from a previous successful fetch (full
+         universe cache, then the smaller Nifty500 cache)
+      4. A small fixed FALLBACK_UNIVERSE (only if there's truly no
+         internet and no prior cache at all)
+
+    Every symbol found is also upserted into stock_master, so the
+    normal search box and the watchlist "add stock" search both pick
+    it up automatically - no separate code path needed.
+    """
+    cursor = conn.cursor()
+    try:
+        if progress_callback:
+            progress_callback("Downloading full NSE stock list (~2000 stocks)...")
+        session = requests.Session()
+        session.get("https://www.nseindia.com", headers=NSE_HEADERS, timeout=10)
+        resp = session.get(
+            "https://nsearchives.nseindia.com/content/equity/EQUITY_L.csv",
+            headers=NSE_HEADERS, timeout=25,
+        )
+        resp.raise_for_status()
+        lines = resp.text.strip().split("\n")[1:]
+        symbols = []
+        for line in lines:
+            parts = [p.strip().strip('"') for p in line.split(",")]
+            # EQUITY_L.csv columns: SYMBOL, NAME OF COMPANY, SERIES, ...
+            if len(parts) >= 2 and parts[0]:
+                symbols.append((parts[0], parts[1]))
+        if len(symbols) >= 500:
+            cursor.execute("DELETE FROM nse_universe_cache")
+            cursor.executemany(
+                "INSERT OR REPLACE INTO nse_universe_cache (symbol, company_name) VALUES (?, ?)", symbols,
+            )
+            cursor.executemany(
+                "INSERT OR IGNORE INTO stock_master (symbol, company_name, sector, price, market_cap) "
+                "VALUES (?, ?, 'N/A', 0.0, 0)",
+                symbols,
+            )
+            conn.commit()
+            if progress_callback:
+                progress_callback(f"Loaded {len(symbols)} NSE stocks into search index.")
+            return symbols
+    except Exception:
+        pass
+
+    # Attempt 2: smaller Nifty500 backup
+    n500 = _fetch_nifty500_only(conn)
+    if n500:
+        if progress_callback:
+            progress_callback(f"Loaded {len(n500)} Nifty500 stocks (full list unavailable).")
+        return n500
+
+    # Attempt 3: caches from a previous successful run
+    cursor.execute("SELECT symbol, company_name FROM nse_universe_cache")
     cached = cursor.fetchall()
     if cached:
         return cached
+    cursor.execute("SELECT symbol, company_name FROM nifty500_cache")
+    cached2 = cursor.fetchall()
+    if cached2:
+        return cached2
 
     # Last resort: small fixed list
     return FALLBACK_UNIVERSE
+
+
+def fetch_market_caps(conn, progress_callback=None, limit=None):
+    """
+    Best-effort market-cap enrichment so search / analytics can be
+    ranked by market capitalisation (top-2000-by-market-cap). There is
+    no single free bulk market-cap feed for the whole NSE universe, so
+    this fetches it stock-by-stock via yfinance. For ~2000 stocks this
+    is genuinely slow (can take 15-30+ minutes) - it's a manual action
+    in Settings, not something run automatically on every sync. Results
+    are cached in stock_master.market_cap and reused until you run it
+    again.
+    """
+    cursor = conn.cursor()
+    cursor.execute("SELECT symbol FROM stock_master ORDER BY symbol")
+    symbols = [r[0] for r in cursor.fetchall()]
+    if limit:
+        symbols = symbols[:limit]
+    total = len(symbols)
+    updated = 0
+    for i, sym in enumerate(symbols, 1):
+        try:
+            t = yf.Ticker(f"{sym}.NS")
+            cap = None
+            try:
+                cap = t.fast_info.get("market_cap")
+            except Exception:
+                cap = None
+            if not cap:
+                try:
+                    cap = t.info.get("marketCap")
+                except Exception:
+                    cap = None
+            if cap:
+                cursor.execute("UPDATE stock_master SET market_cap=? WHERE symbol=?", (float(cap), sym))
+                updated += 1
+        except Exception:
+            continue
+        if i % 25 == 0:
+            conn.commit()
+            if progress_callback:
+                progress_callback(f"Market cap scan: {i}/{total} done, {updated} updated...")
+    conn.commit()
+    set_setting(conn, "market_cap_last_updated", datetime.now().strftime("%d %b %Y, %H:%M"))
+    if progress_callback:
+        progress_callback(f"Market cap scan complete: {updated}/{total} stocks updated.")
+    return updated
 
 
 def search_stock_db(conn, query):
     cursor = conn.cursor()
     cursor.execute(
         "SELECT symbol, company_name, sector, price FROM stock_master "
-        "WHERE symbol LIKE ? OR company_name LIKE ? LIMIT 30",
+        "WHERE symbol LIKE ? OR company_name LIKE ? "
+        "ORDER BY market_cap DESC, company_name ASC LIMIT 30",
         (f"%{query}%", f"%{query}%"),
     )
     return cursor.fetchall()
@@ -275,6 +396,14 @@ def is_market_open():
     open_time = now.replace(hour=9, minute=15, second=0, microsecond=0)
     close_time = now.replace(hour=15, minute=30, second=0, microsecond=0)
     return open_time <= now <= close_time
+
+
+def get_available_mover_dates(conn):
+    """All dates we have saved gainer/loser data for, newest first -
+    powers the date picker so old days' data stays browsable."""
+    cursor = conn.cursor()
+    cursor.execute("SELECT DISTINCT date FROM market_movers ORDER BY date DESC")
+    return [row[0] for row in cursor.fetchall()]
 
 
 def get_market_movers(conn, mover_type, date=None):
@@ -362,12 +491,12 @@ def fetch_dhan_scrip_master(conn):
 
 def fetch_top_movers_from_dhan(conn, name_lookup):
     """
-    Uses the authenticated DhanHQ market data API (requires a free Dhan
-    account + API access token, set in Settings) to fetch OHLC data for
-    the whole stock universe and compute Top 10 Gainers/Losers. This is
-    far more reliable than scraping a website since it's an official,
-    authenticated API. Returns (gainers, losers, data_date) or
-    (None, None, None) if Dhan isn't configured or the call fails.
+    PRIORITY 1: Uses the authenticated DhanHQ market data API (requires
+    a free Dhan account + API access token, set in Settings) to fetch
+    OHLC data for the whole stock universe and compute Top 10
+    Gainers/Losers. This is the most reliable source since it's an
+    official, authenticated broker API.
+    Returns (gainers, losers, data_date) or (None, None, None).
     """
     client_id = get_setting(conn, "dhan_client_id")
     access_token = get_setting(conn, "dhan_access_token")
@@ -382,7 +511,7 @@ def fetch_top_movers_from_dhan(conn, name_lookup):
         cursor.execute("SELECT symbol, security_id FROM dhan_scrip_cache")
         sec_id_map = {row[0]: row[1] for row in cursor.fetchall()}
 
-        universe = fetch_nifty500_universe(conn)
+        universe = list(name_lookup.items())
         sec_ids = []
         secid_to_symbol = {}
         for symbol, _ in universe:
@@ -446,39 +575,33 @@ def fetch_top_movers_from_dhan(conn, name_lookup):
 
 def fetch_top_movers_from_nse(name_lookup):
     """
-    Fetches pre-computed top gainers/losers directly from NSE's live
-    market-movers endpoint (the same data source behind nseindia.com and
-    Groww's 'Top Gainers/Losers' pages). Much faster than downloading
-    all 500 stocks ourselves. Returns (gainers, losers, data_date) or
-    (None, None, None) if it couldn't be fetched/parsed.
+    PRIORITY 2: Fetches pre-computed top gainers/losers directly from
+    NSE's live market-movers endpoint (the same data source behind
+    nseindia.com and most broker apps' 'Top Gainers/Losers' pages).
+    Much faster than downloading the whole universe ourselves.
+    Returns (gainers, losers, data_date) or (None, None, None).
     """
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                          "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-            "Accept": "application/json",
-        }
         session = requests.Session()
-        session.get("https://www.nseindia.com/market-data/top-gainers-losers", headers=headers, timeout=10)
+        session.get("https://www.nseindia.com/market-data/top-gainers-losers", headers=NSE_HEADERS, timeout=10)
 
         resp_g = session.get(
             "https://www.nseindia.com/api/live-analysis-variations?index=gainers",
-            headers=headers, timeout=15,
+            headers=NSE_HEADERS, timeout=15,
         )
         resp_g.raise_for_status()
         data_g = resp_g.json()
 
         resp_l = session.get(
             "https://www.nseindia.com/api/live-analysis-variations?index=loosers",
-            headers=headers, timeout=15,
+            headers=NSE_HEADERS, timeout=15,
         )
         resp_l.raise_for_status()
         data_l = resp_l.json()
 
         def extract(payload):
-            # "allSec" = All Securities on NSE, the broadest live-movers list NSE
-            # publishes (their site doesn't expose a Nifty-500-only cut of this
-            # particular feed, so this is the closest official equivalent).
+            # "allSec" = All Securities on NSE, the broadest live-movers list
+            # NSE publishes for this feed.
             rows = payload.get("allSec", {}).get("data", [])
             out = []
             for r in rows:
@@ -508,20 +631,24 @@ def fetch_top_movers_from_nse(name_lookup):
 
 def perform_full_market_sync(conn, progress_callback=None):
     """
-    Refreshes Top 10 Gainers / Top 10 Losers, the watchlist, and the news
-    feed. Tries the fast NSE live-movers endpoint first (a few seconds);
-    if that's unavailable, falls back to scanning the whole stock
-    universe ourselves (slower, a minute or more).
+    Refreshes EVERYTHING in the app in one go: the full ~2000 stock
+    search index, Top 10 Gainers / Losers (saved per-date so history
+    stays browsable), the watchlist, and the news feed.
+
+    Fallback chain (unchanged priority, kept in this order):
+      1. Dhan API (authenticated broker feed - fastest & most reliable)
+      2. NSE live top-movers endpoint
+      3. Full universe scan via yfinance (slowest, last resort)
     """
     try:
-        cursor = conn.cursor()
-        cursor.execute("SELECT symbol, company_name FROM stock_master")
-        name_lookup = {row[0]: row[1] for row in cursor.fetchall()}
+        if progress_callback:
+            progress_callback("Refreshing full stock search index...")
+        universe = fetch_full_market_universe(conn, progress_callback)
+        name_lookup = {sym: name for sym, name in universe}
 
         if progress_callback:
             progress_callback("Trying Dhan API...")
         gainers, losers, data_date = fetch_top_movers_from_dhan(conn, name_lookup)
-        used_fallback = False
         source_used = "Dhan"
 
         if not gainers or not losers:
@@ -531,15 +658,15 @@ def perform_full_market_sync(conn, progress_callback=None):
             source_used = "NSE"
 
         if not gainers or not losers:
-            used_fallback = True
             source_used = "Full Scan"
             if progress_callback:
                 progress_callback("Fast methods unavailable, doing a full scan instead (this is slower)...")
-            gainers, losers, data_date = _scan_full_universe_for_movers(conn, progress_callback)
+            gainers, losers, data_date = _scan_full_universe_for_movers(conn, universe, progress_callback)
 
         if not gainers or not losers or not data_date:
             return "Sync Failed: No data received (check internet connection)", False
 
+        cursor = conn.cursor()
         cursor.execute("DELETE FROM market_movers WHERE date=?", (data_date,))
         for rank, m in enumerate(gainers, 1):
             cursor.execute(
@@ -627,19 +754,18 @@ def perform_full_market_sync(conn, progress_callback=None):
         return f"Sync Failed: {e}", False
 
 
-def _scan_full_universe_for_movers(conn, progress_callback=None):
+def _scan_full_universe_for_movers(conn, universe, progress_callback=None):
     """
-    Fallback used only if the fast NSE endpoint is unreachable: downloads
-    price data for the whole stock universe ourselves and computes top
-    gainers/losers manually. Slower (can take a minute or more).
+    PRIORITY 3 (last resort): downloads price data for the whole stock
+    universe ourselves and computes top gainers/losers manually.
+    Slower (can take a few minutes for ~2000 stocks).
     """
-    universe = fetch_nifty500_universe(conn)
     symbols_only = [s for s, _ in universe]
     name_lookup = {s: n for s, n in universe}
     tickers = [f"{s}.NS" for s in symbols_only]
 
     if progress_callback:
-        progress_callback(f"Downloading price data for {len(tickers)} stocks (this can take a minute)...")
+        progress_callback(f"Downloading price data for {len(tickers)} stocks (this can take a few minutes)...")
 
     movers = []
     data_date = None
@@ -726,6 +852,13 @@ def main(page: ft.Page):
 
     main_content = ft.Container(expand=True)
 
+    # ---------- CLIPBOARD COPY HELPER ----------
+    def copy_to_clipboard(text, label="Text"):
+        page.set_clipboard(text)
+        page.snack_bar = ft.SnackBar(content=ft.Text(f"{label} copied to clipboard"), duration=1200)
+        page.snack_bar.open = True
+        page.update()
+
     # ---------- SPLASH SCREEN ----------
     splash_screen = ft.Container(
         expand=True,
@@ -775,13 +908,19 @@ def main(page: ft.Page):
             refresh_watchlist_list()
             page.update()
 
+        def on_copy_click(e):
+            copy_to_clipboard(f"{symbol} - {company_name} - Rs.{price:,.2f}", "Stock info")
+
         details_page = ft.Container(
             padding=20,
             content=ft.Column([
                 ft.Row([
                     ft.IconButton(Icons.ARROW_BACK, on_click=go_back),
                     ft.Text(f"{symbol} Details", size=24, weight=ft.FontWeight.BOLD),
-                    ft.IconButton(content=fav_icon, on_click=on_fav_click, tooltip="Add/Remove Watchlist"),
+                    ft.Row([
+                        ft.IconButton(Icons.COPY, on_click=on_copy_click, tooltip="Copy stock info"),
+                        ft.IconButton(content=fav_icon, on_click=on_fav_click, tooltip="Add/Remove Watchlist"),
+                    ], spacing=0),
                 ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
                 ft.Divider(),
                 ft.Card(
@@ -807,7 +946,7 @@ def main(page: ft.Page):
 
     # ---------- HOME SCREEN ----------
     search_input = ft.TextField(
-        hint_text="Search Stock (e.g. RELIANCE, TCS)",
+        hint_text="Search Stock (e.g. RELIANCE, TCS, RELAXO)",
         prefix_icon=Icons.SEARCH,
         border_radius=30,
         filled=True,
@@ -887,6 +1026,7 @@ def main(page: ft.Page):
             sync_status_text.color = Colors.GREEN if success else Colors.RED
             update_button.disabled = False
             update_button.text = "Update Market Data"
+            # Real-time refresh: EVERY screen's data reflects the new sync immediately
             refresh_watchlist_list()
             refresh_news_screen()
             refresh_analytics_screen()
@@ -969,6 +1109,12 @@ def main(page: ft.Page):
                                             icon_color=Colors.BLUE_700,
                                             on_click=lambda e, c=company_name: page.launch_url(google_news_url(c)),
                                         ),
+                                        ft.IconButton(
+                                            Icons.COPY, icon_size=16,
+                                            tooltip="Copy",
+                                            on_click=lambda e, s=symbol, p=pct_change: copy_to_clipboard(
+                                                f"{s} {p:+.2f}%", "Stock"),
+                                        ),
                                     ],
                                     alignment=ft.MainAxisAlignment.END,
                                 ),
@@ -1028,7 +1174,7 @@ def main(page: ft.Page):
         page.update()
 
     add_watchlist_input = ft.TextField(
-        hint_text="Type stock name or symbol (e.g. TATA, Reliance)",
+        hint_text="Type any 3 letters - covers all ~2000 NSE stocks",
         prefix_icon=Icons.SEARCH,
         border_radius=25,
         filled=True,
@@ -1099,6 +1245,17 @@ def main(page: ft.Page):
                                     spacing=0, expand=True,
                                 ),
                                 right_block,
+                                ft.IconButton(
+                                    Icons.COPY, icon_size=16,
+                                    tooltip="Copy",
+                                    on_click=lambda e, s=symbol, p=price: copy_to_clipboard(
+                                        f"{s} - Rs.{p:,.2f}" if p else s, "Stock"),
+                                ),
+                                ft.IconButton(
+                                    Icons.OPEN_IN_NEW, icon_size=16,
+                                    tooltip="News",
+                                    on_click=lambda e, c=company_name: page.launch_url(google_news_url(c)),
+                                ),
                                 ft.IconButton(Icons.CLOSE, icon_size=16, on_click=make_remove(symbol)),
                             ],
                             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
@@ -1161,13 +1318,29 @@ def main(page: ft.Page):
                         ],
                         horizontal_alignment=ft.CrossAxisAlignment.END, spacing=2,
                     ),
+                    ft.Column(
+                        [
+                            ft.IconButton(
+                                Icons.OPEN_IN_NEW, icon_size=15,
+                                tooltip="News",
+                                on_click=lambda e, c=company_name: page.launch_url(google_news_url(c)),
+                            ),
+                            ft.IconButton(
+                                Icons.COPY, icon_size=15,
+                                tooltip="Copy",
+                                on_click=lambda e, s=symbol, p=price, pc=pct_change: copy_to_clipboard(
+                                    f"{s} Rs.{p:,.2f} ({pc:+.2f}%)", "Stock"),
+                            ),
+                        ],
+                        spacing=0,
+                    ),
                 ],
                 alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                spacing=10,
+                spacing=6,
             ),
         )
 
-    def build_mover_section(title, icon, accent_color, rows):
+    def build_mover_section(rows):
         body = ft.Column(spacing=2)
         if not rows:
             body.controls.append(
@@ -1181,41 +1354,81 @@ def main(page: ft.Page):
                     body.controls.append(ft.Divider(height=1))
         return body
 
-    mover_state = {"selected": "gainer"}
+    # selected: None means neither list is shown (per your sketch: date + two
+    # boxes, only the tapped one opens up). selected_date: None = latest.
+    mover_state = {"selected": None, "selected_date": None}
     analytics_date_text = ft.Text("No data synced yet", size=13, color=Colors.GREY_500)
     analytics_list_body = ft.Column(spacing=2)
+    analytics_date_dropdown = ft.Dropdown(label="Date", options=[], visible=False, width=180)
 
     def render_mover_list():
         mtype = mover_state["selected"]
-        rows, data_date = get_market_movers(db_conn, mtype)
-        analytics_date_text.value = f"Date: {data_date}" if data_date else "No data synced yet"
         analytics_list_body.controls.clear()
-        analytics_list_body.controls.append(
-            build_mover_section("", None, Colors.GREEN if mtype == "gainer" else Colors.RED, rows)
-        )
+
+        if mtype is None:
+            analytics_date_text.value = "Tap 'Top 10 Gainers' or 'Top 10 Losers' to view"
+            analytics_list_body.controls.append(
+                ft.Text("Nothing selected yet.", color=Colors.GREY_500, size=12)
+            )
+            return
+
+        chosen_date = mover_state["selected_date"]
+        rows, data_date = get_market_movers(db_conn, mtype, chosen_date)
+        analytics_date_text.value = f"Date: {data_date}" if data_date else "No data synced yet"
+        analytics_list_body.controls.append(build_mover_section(rows))
+
+    def refresh_date_dropdown():
+        dates = get_available_mover_dates(db_conn)
+        analytics_date_dropdown.options = [ft.dropdown.Option(d, d) for d in dates]
+        if dates:
+            analytics_date_dropdown.visible = True
+            if mover_state["selected_date"] not in dates:
+                mover_state["selected_date"] = dates[0]
+            analytics_date_dropdown.value = mover_state["selected_date"]
+        else:
+            analytics_date_dropdown.visible = False
+
+    def on_date_change(e):
+        mover_state["selected_date"] = analytics_date_dropdown.value
+        render_mover_list()
+        page.update()
+
+    analytics_date_dropdown.on_change = on_date_change
 
     def select_gainers(e):
-        mover_state["selected"] = "gainer"
-        gainer_btn.bgcolor = Colors.GREEN
-        gainer_btn.color = Colors.WHITE
-        loser_btn.bgcolor = Colors.GREY_200
-        loser_btn.color = Colors.BLACK
+        # Tap again to hide it (per your request: click to show, otherwise don't show)
+        if mover_state["selected"] == "gainer":
+            mover_state["selected"] = None
+            gainer_btn.bgcolor = Colors.GREY_200
+            gainer_btn.color = Colors.BLACK
+        else:
+            mover_state["selected"] = "gainer"
+            gainer_btn.bgcolor = Colors.GREEN
+            gainer_btn.color = Colors.WHITE
+            loser_btn.bgcolor = Colors.GREY_200
+            loser_btn.color = Colors.BLACK
         render_mover_list()
         page.update()
 
     def select_losers(e):
-        mover_state["selected"] = "loser"
-        loser_btn.bgcolor = Colors.RED
-        loser_btn.color = Colors.WHITE
-        gainer_btn.bgcolor = Colors.GREY_200
-        gainer_btn.color = Colors.BLACK
+        if mover_state["selected"] == "loser":
+            mover_state["selected"] = None
+            loser_btn.bgcolor = Colors.GREY_200
+            loser_btn.color = Colors.BLACK
+        else:
+            mover_state["selected"] = "loser"
+            loser_btn.bgcolor = Colors.RED
+            loser_btn.color = Colors.WHITE
+            gainer_btn.bgcolor = Colors.GREY_200
+            gainer_btn.color = Colors.BLACK
         render_mover_list()
         page.update()
 
-    gainer_btn = ft.ElevatedButton("Top 10 Gainers", bgcolor=Colors.GREEN, color=Colors.WHITE, on_click=select_gainers, expand=True)
+    gainer_btn = ft.ElevatedButton("Top 10 Gainers", bgcolor=Colors.GREY_200, color=Colors.BLACK, on_click=select_gainers, expand=True)
     loser_btn = ft.ElevatedButton("Top 10 Losers", bgcolor=Colors.GREY_200, color=Colors.BLACK, on_click=select_losers, expand=True)
 
     def refresh_analytics_screen():
+        refresh_date_dropdown()
         render_mover_list()
 
     analytics_screen = ft.Container(
@@ -1229,7 +1442,8 @@ def main(page: ft.Page):
                         padding=15,
                         content=ft.Column(
                             [
-                                analytics_date_text,
+                                ft.Row([analytics_date_text, analytics_date_dropdown],
+                                       alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
                                 ft.Container(height=10),
                                 ft.Row([gainer_btn, loser_btn], spacing=10),
                                 ft.Divider(),
@@ -1299,6 +1513,62 @@ def main(page: ft.Page):
     )
     dhan_status_text = ft.Text("", size=12)
 
+    # ---- Full market universe / market-cap ranking controls ----
+    universe_status_text = ft.Text("", size=12, color=Colors.GREY_600)
+
+    def on_scan_universe(e):
+        scan_universe_btn.disabled = True
+        scan_universe_btn.text = "Scanning..."
+        page.update()
+
+        def progress_callback(msg):
+            universe_status_text.value = msg
+            page.update()
+
+        def do_scan():
+            universe = fetch_full_market_universe(db_conn, progress_callback)
+            universe_status_text.value = f"Search index now covers {len(universe)} NSE stocks."
+            universe_status_text.color = Colors.GREEN
+            scan_universe_btn.disabled = False
+            scan_universe_btn.text = "Scan Full Market (~2000 stocks)"
+            page.update()
+
+        threading.Thread(target=do_scan, daemon=True).start()
+
+    scan_universe_btn = ft.ElevatedButton(
+        "Scan Full Market (~2000 stocks)",
+        icon=Icons.TRAVEL_EXPLORE,
+        on_click=on_scan_universe,
+    )
+
+    market_cap_status_text = ft.Text(
+        f"Last updated: {get_setting(db_conn, 'market_cap_last_updated', 'never')}",
+        size=12, color=Colors.GREY_600,
+    )
+
+    def on_fetch_market_caps(e):
+        cap_btn.disabled = True
+        cap_btn.text = "Ranking by market cap..."
+        page.update()
+
+        def progress_callback(msg):
+            market_cap_status_text.value = msg
+            page.update()
+
+        def do_fetch():
+            fetch_market_caps(db_conn, progress_callback)
+            cap_btn.disabled = False
+            cap_btn.text = "Update Market-Cap Ranking (Slow)"
+            page.update()
+
+        threading.Thread(target=do_fetch, daemon=True).start()
+
+    cap_btn = ft.ElevatedButton(
+        "Update Market-Cap Ranking (Slow)",
+        icon=Icons.LEADERBOARD,
+        on_click=on_fetch_market_caps,
+    )
+
     settings_screen = ft.Container(
         padding=20,
         content=ft.Column(
@@ -1308,10 +1578,29 @@ def main(page: ft.Page):
                 ft.Text("Appearance", size=18, weight=ft.FontWeight.W_600),
                 theme_dropdown,
                 ft.Container(height=20),
+                ft.Text("Stock Search Coverage", size=18, weight=ft.FontWeight.W_600),
+                ft.Text(
+                    "Runs automatically on every 'Update Market Data' - use this only if you "
+                    "want to refresh the search index without doing a full market sync.",
+                    size=12, color=Colors.GREY_500,
+                ),
+                scan_universe_btn,
+                universe_status_text,
+                ft.Container(height=10),
+                ft.Text(
+                    "Ranks search results and analytics by market capitalisation. "
+                    "This scans stocks one by one (no free bulk source exists) so it can take "
+                    "15-30+ minutes for the full list - run it occasionally, not every day.",
+                    size=12, color=Colors.GREY_500,
+                ),
+                cap_btn,
+                market_cap_status_text,
+                ft.Container(height=20),
                 ft.Text("Dhan API (fastest, most reliable data source)", size=18, weight=ft.FontWeight.W_600),
                 ft.Text(
                     "Free to get: open a Dhan account, then generate an Access Token from web.dhan.co. "
-                    "Leave blank to use free public data sources instead (slower).",
+                    "Leave blank to use free public data sources instead (slower). "
+                    "Fallback order: Dhan API -> NSE live data -> Yahoo Finance full scan.",
                     size=12, color=Colors.GREY_500,
                 ),
                 dhan_client_input,
@@ -1329,9 +1618,10 @@ def main(page: ft.Page):
                 ft.Container(height=20),
                 ft.Text("App Info", size=18, weight=ft.FontWeight.W_600),
                 ft.Card(content=ft.Container(padding=15, content=ft.Column([
-                    ft.Text("Version: 1.0.0 (StockAI Pro)"),
+                    ft.Text("Version: 2.0.0 (StockAI Pro)"),
                     ft.Text("Database: Local SQLite"),
-                    ft.Text("Data source: Dhan API / NSE live data / Yahoo Finance (fallback order)"),
+                    ft.Text("Data source order: Dhan API -> NSE live data -> Yahoo Finance (full scan fallback)"),
+                    ft.Text("Search coverage: full NSE universe (~2000 stocks)"),
                 ]))),
             ],
             scroll=ft.ScrollMode.AUTO,
@@ -1405,6 +1695,16 @@ def main(page: ft.Page):
     def load_home():
         try:
             time.sleep(2)
+            # Populate the full ~2000 stock search index right away, so
+            # search/watchlist-add works even before the user taps Sync.
+            def universe_progress(msg):
+                sync_status_text.value = msg
+                page.update()
+            threading.Thread(
+                target=lambda: fetch_full_market_universe(db_conn, universe_progress),
+                daemon=True,
+            ).start()
+
             refresh_recent_list()
             refresh_watchlist_list()
             refresh_news_screen()
