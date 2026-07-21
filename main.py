@@ -7,6 +7,16 @@ import threading
 import time
 import shutil
 
+# Optional: only needed for the "send PDF to Telegram" feature.
+# If it's not installed, the app still works - PDF sending is just skipped
+# and a text-only Telegram message is sent instead.
+try:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas as pdf_canvas
+    REPORTLAB_AVAILABLE = True
+except ImportError:
+    REPORTLAB_AVAILABLE = False
+
 # ==========================================
 # COMPATIBILITY SHIMS (works on old & new Flet)
 # ==========================================
@@ -833,6 +843,165 @@ def clear_cache(conn):
 
 
 # ==========================================
+# TELEGRAM NOTIFICATIONS (gainers/losers auto-sent after every sync)
+# ==========================================
+def send_telegram_message(bot_token, chat_id, text):
+    try:
+        resp = requests.post(
+            f"https://api.telegram.org/bot{bot_token}/sendMessage",
+            json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
+            timeout=15,
+        )
+        return resp.ok
+    except Exception:
+        return False
+
+
+def send_telegram_document(bot_token, chat_id, file_path, caption=""):
+    try:
+        with open(file_path, "rb") as f:
+            resp = requests.post(
+                f"https://api.telegram.org/bot{bot_token}/sendDocument",
+                data={"chat_id": chat_id, "caption": caption},
+                files={"document": f},
+                timeout=30,
+            )
+        return resp.ok
+    except Exception:
+        return False
+
+
+def fetch_telegram_chat_id(bot_token):
+    """
+    Telegram never lets a bot message someone using just a phone number
+    (spam protection) - this is a platform rule that applies to every
+    bot ever made, not something specific to this app. The one-time
+    workaround: the user sends any message (e.g. /start) to their own
+    bot once, and we read that message back to learn their chat id.
+    After that, no further manual step is ever needed again.
+    """
+    try:
+        resp = requests.get(f"https://api.telegram.org/bot{bot_token}/getUpdates", timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        results = data.get("result", [])
+        if not results:
+            return None, "No messages found yet. Send /start to your bot on Telegram first, then tap this again."
+        last = results[-1]
+        chat = last.get("message", {}).get("chat", {})
+        chat_id = chat.get("id")
+        name = chat.get("first_name") or chat.get("username") or "your account"
+        if chat_id:
+            return str(chat_id), f"Connected! Updates will be sent to {name} on Telegram."
+        return None, "Couldn't read a chat id from Telegram's response."
+    except Exception as e:
+        return None, f"Failed: {e}"
+
+
+def build_movers_text_message(gainers, losers, data_date):
+    lines = ["<b>StockAI Pro - Market Movers</b>", f"Date: {data_date}", "", "<b>Top Gainers</b>"]
+    for i, m in enumerate(gainers[:10], 1):
+        lines.append(f"{i}. {m['symbol']} - Rs.{m['price']:,.2f} ({m['pct_change']:+.2f}%)")
+    lines.append("")
+    lines.append("<b>Top Losers</b>")
+    for i, m in enumerate(losers[:10], 1):
+        lines.append(f"{i}. {m['symbol']} - Rs.{m['price']:,.2f} ({m['pct_change']:+.2f}%)")
+    return "\n".join(lines)
+
+
+def generate_movers_pdf(gainers, losers, data_date, path="movers_report.pdf"):
+    if not REPORTLAB_AVAILABLE:
+        return None
+    try:
+        c = pdf_canvas.Canvas(path, pagesize=A4)
+        width, height = A4
+        y = height - 50
+
+        def new_page_if_needed(cur_y):
+            if cur_y < 60:
+                c.showPage()
+                return height - 50
+            return cur_y
+
+        c.setFont("Helvetica-Bold", 16)
+        c.drawString(40, y, "StockAI Pro - Market Movers")
+        y -= 20
+        c.setFont("Helvetica", 11)
+        c.drawString(40, y, f"Date: {data_date}")
+        y -= 30
+
+        c.setFont("Helvetica-Bold", 13)
+        c.drawString(40, y, "Top Gainers")
+        y -= 20
+        c.setFont("Helvetica", 10)
+        for i, m in enumerate(gainers[:10], 1):
+            y = new_page_if_needed(y)
+            c.drawString(40, y, f"{i}. {m['symbol']} - {m['company_name'][:28]}")
+            c.drawString(320, y, f"Rs.{m['price']:,.2f}  ({m['pct_change']:+.2f}%)")
+            y -= 16
+
+        y -= 15
+        y = new_page_if_needed(y)
+        c.setFont("Helvetica-Bold", 13)
+        c.drawString(40, y, "Top Losers")
+        y -= 20
+        c.setFont("Helvetica", 10)
+        for i, m in enumerate(losers[:10], 1):
+            y = new_page_if_needed(y)
+            c.drawString(40, y, f"{i}. {m['symbol']} - {m['company_name'][:28]}")
+            c.drawString(320, y, f"Rs.{m['price']:,.2f}  ({m['pct_change']:+.2f}%)")
+            y -= 16
+
+        c.save()
+        return path
+    except Exception:
+        return None
+
+
+def send_telegram_movers_update(conn, progress_callback=None):
+    """
+    Sends the latest saved gainers/losers as a Telegram text message,
+    plus a PDF report if reportlab is installed, to the chat id saved
+    in Settings. Does nothing (silently) if Telegram isn't configured -
+    this is an optional feature, not required for the app to work.
+    """
+    bot_token = get_setting(conn, "telegram_bot_token")
+    chat_id = get_setting(conn, "telegram_chat_id")
+    if not bot_token or not chat_id:
+        return
+
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT MAX(date) FROM market_movers")
+        row = cursor.fetchone()
+        data_date = row[0] if row else None
+        if not data_date:
+            return
+
+        gainer_rows, _ = get_market_movers(conn, "gainer", data_date)
+        loser_rows, _ = get_market_movers(conn, "loser", data_date)
+        gainers = [{"symbol": r[1], "company_name": r[2], "price": r[3], "pct_change": r[4]} for r in gainer_rows]
+        losers = [{"symbol": r[1], "company_name": r[2], "price": r[3], "pct_change": r[4]} for r in loser_rows]
+        if not gainers and not losers:
+            return
+
+        if progress_callback:
+            progress_callback("Sending update to Telegram...")
+
+        text = build_movers_text_message(gainers, losers, data_date)
+        send_telegram_message(bot_token, chat_id, text)
+
+        pdf_path = generate_movers_pdf(gainers, losers, data_date)
+        if pdf_path:
+            send_telegram_document(bot_token, chat_id, pdf_path, caption=f"Market Movers - {data_date}")
+
+        if progress_callback:
+            progress_callback("Telegram update sent.")
+    except Exception:
+        pass
+
+
+# ==========================================
 # 2. MAIN APPLICATION
 # ==========================================
 def main(page: ft.Page):
@@ -1031,6 +1200,8 @@ def main(page: ft.Page):
             refresh_news_screen()
             refresh_analytics_screen()
             page.update()
+            if success:
+                send_telegram_movers_update(db_conn, progress_callback)
 
         threading.Thread(target=do_sync, daemon=True).start()
 
@@ -1514,6 +1685,56 @@ def main(page: ft.Page):
     )
     dhan_status_text = ft.Text("", size=12)
 
+    # ---- Telegram auto-notifications ----
+    telegram_phone_input = ft.TextField(
+        label="Your Telegram Phone Number (for your reference)",
+        value=get_setting(db_conn, "telegram_phone_number", ""),
+        border_radius=10,
+        hint_text="+91XXXXXXXXXX",
+    )
+    telegram_token_input = ft.TextField(
+        label="Telegram Bot Token (from @BotFather)",
+        value=get_setting(db_conn, "telegram_bot_token", ""),
+        password=True,
+        can_reveal_password=True,
+        border_radius=10,
+    )
+    telegram_status_text = ft.Text(
+        "Connected" if get_setting(db_conn, "telegram_chat_id") else "Not connected yet",
+        size=12,
+        color=Colors.GREEN if get_setting(db_conn, "telegram_chat_id") else Colors.GREY_500,
+    )
+
+    def on_telegram_save(e):
+        set_setting(db_conn, "telegram_phone_number", (telegram_phone_input.value or "").strip())
+        set_setting(db_conn, "telegram_bot_token", (telegram_token_input.value or "").strip())
+        telegram_status_text.value = "Bot Token saved. Now send /start to your bot on Telegram, then tap 'Connect My Telegram'."
+        telegram_status_text.color = Colors.BLUE_700
+        page.update()
+
+    def on_telegram_connect(e):
+        token = (telegram_token_input.value or "").strip()
+        if not token:
+            telegram_status_text.value = "Save your Bot Token first."
+            telegram_status_text.color = Colors.RED
+            page.update()
+            return
+        connect_btn.disabled = True
+        connect_btn.text = "Connecting..."
+        page.update()
+        chat_id, msg = fetch_telegram_chat_id(token)
+        if chat_id:
+            set_setting(db_conn, "telegram_chat_id", chat_id)
+            telegram_status_text.color = Colors.GREEN
+        else:
+            telegram_status_text.color = Colors.RED
+        telegram_status_text.value = msg
+        connect_btn.disabled = False
+        connect_btn.text = "Connect My Telegram"
+        page.update()
+
+    connect_btn = ft.ElevatedButton("Connect My Telegram", icon=Icons.SEND, on_click=on_telegram_connect)
+
     # ---- Full market universe / market-cap ranking controls ----
     universe_status_text = ft.Text("", size=12, color=Colors.GREY_600)
 
@@ -1609,6 +1830,23 @@ def main(page: ft.Page):
                 ft.ElevatedButton("Save Dhan Credentials", on_click=on_dhan_save),
                 dhan_status_text,
                 ft.Container(height=20),
+                ft.Text("Telegram Auto-Updates", size=18, weight=ft.FontWeight.W_600),
+                ft.Text(
+                    "Gainers/losers (text + PDF) will be sent to your Telegram automatically "
+                    "every time market data is updated. One-time setup:\n"
+                    "1. Message @BotFather on Telegram -> /newbot -> copy the Bot Token below.\n"
+                    "2. Send any message (e.g. /start) to your new bot on Telegram.\n"
+                    "3. Tap 'Connect My Telegram' below - after that, no manual step is ever needed again.",
+                    size=12, color=Colors.GREY_500,
+                ),
+                telegram_phone_input,
+                telegram_token_input,
+                ft.Row([
+                    ft.ElevatedButton("Save Bot Token", on_click=on_telegram_save),
+                    connect_btn,
+                ], spacing=10),
+                telegram_status_text,
+                ft.Container(height=20),
                 ft.Text("Database Management", size=18, weight=ft.FontWeight.W_600),
                 ft.Card(content=ft.Column([
                     ft.ListTile(leading=ft.Icon(Icons.BACKUP), title=ft.Text("Backup Database"), on_click=on_backup),
@@ -1690,6 +1928,8 @@ def main(page: ft.Page):
                 refresh_news_screen()
                 refresh_analytics_screen()
                 page.update()
+                if success:
+                    send_telegram_movers_update(db_conn, progress_callback)
         except Exception:
             pass
 
