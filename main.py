@@ -31,6 +31,23 @@ except AttributeError:
     Colors = ft.colors
 
 # ==========================================
+# PREMIUM DARK THEME (TradingView-style palette)
+# ==========================================
+BG = "#0B0E14"            # app background - near-black
+SURFACE = "#151922"        # cards / rows
+SURFACE_ALT = "#1C212C"    # inputs, secondary surfaces
+BORDER = "#252B38"         # hairline borders
+ACCENT = "#2962FF"         # TradingView blue - primary actions / links
+ACCENT_SOFT = "#1E2A4A"    # accent used as a subtle fill
+GREEN = "#26A69A"          # gains
+RED = "#EF5350"            # losses
+TEXT_PRIMARY = "#E8EAED"
+TEXT_SECONDARY = "#8B93A7"
+TEXT_MUTED = "#5C6470"
+GOLD = "#F0B90B"           # premium highlight accent
+CANDLE_ICON = getattr(Icons, "CANDLESTICK_CHART", None) or Icons.SHOW_CHART
+
+# ==========================================
 # FALLBACK STOCK LIST
 # Used only if EVERY live fetch (NSE full list, NSE Nifty500 list, and
 # both caches) fails - e.g. the very first run with no internet at all.
@@ -1007,6 +1024,7 @@ def send_telegram_movers_update(conn, progress_callback=None):
 def main(page: ft.Page):
     page.title = "StockAI Pro"
     page.padding = 0
+    page.bgcolor = BG
 
     db_conn = init_db()
 
@@ -1017,28 +1035,40 @@ def main(page: ft.Page):
         page.theme_mode = ft.ThemeMode.DARK
     else:
         page.theme_mode = ft.ThemeMode.SYSTEM
-    page.theme = ft.Theme(color_scheme_seed="blue", use_material3=True)
+    page.theme = ft.Theme(color_scheme_seed=ACCENT, use_material3=True)
+    page.dark_theme = ft.Theme(color_scheme_seed=ACCENT, use_material3=True)
 
-    main_content = ft.Container(expand=True)
+    main_content = ft.Container(expand=True, bgcolor=BG)
 
     # ---------- CLIPBOARD COPY HELPER ----------
     def copy_to_clipboard(text, label="Text"):
         page.set_clipboard(text)
-        page.snack_bar = ft.SnackBar(content=ft.Text(f"{label} copied to clipboard"), duration=1200)
+        page.snack_bar = ft.SnackBar(
+            content=ft.Text(f"{label} copied to clipboard", color=TEXT_PRIMARY),
+            bgcolor=SURFACE_ALT, duration=1200,
+        )
         page.snack_bar.open = True
         page.update()
 
     # ---------- SPLASH SCREEN ----------
     splash_screen = ft.Container(
         expand=True,
+        bgcolor=BG,
         alignment=ft.alignment.center,
         content=ft.Column(
             [
-                ft.Icon(Icons.SHOW_CHART, size=90, color=Colors.BLUE_700),
-                ft.Text("StockAI Pro", size=36, weight=ft.FontWeight.W_900),
-                ft.Text("Personal AI Stock Research Terminal", size=14, color=Colors.GREY_500, italic=True),
+                ft.Container(
+                    content=ft.Icon(CANDLE_ICON, size=64, color=ACCENT),
+                    padding=22, bgcolor=SURFACE, border_radius=24,
+                    border=ft.border.all(1, BORDER),
+                ),
+                ft.Container(height=18),
+                ft.Text("StockAI PRO", size=34, weight=ft.FontWeight.W_900, color=TEXT_PRIMARY,
+                        style=ft.TextStyle(letter_spacing=2)),
+                ft.Text("PERSONAL AI STOCK RESEARCH TERMINAL", size=11, color=TEXT_SECONDARY,
+                        style=ft.TextStyle(letter_spacing=2)),
                 ft.Container(height=40),
-                ft.ProgressBar(width=150, color=Colors.BLUE_700),
+                ft.ProgressBar(width=160, color=ACCENT, bgcolor=SURFACE_ALT),
             ],
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
             alignment=ft.MainAxisAlignment.CENTER,
@@ -1065,7 +1095,7 @@ def main(page: ft.Page):
     # ---------- STOCK DETAILS PAGE ----------
     def show_stock_details(symbol, company_name, sector, price):
         is_fav = any(f[0] == symbol for f in get_favorites(db_conn))
-        fav_icon = ft.Icon(Icons.STAR if is_fav else Icons.STAR_BORDER)
+        fav_icon = ft.Icon(Icons.STAR if is_fav else Icons.STAR_BORDER, color=GOLD if is_fav else TEXT_MUTED)
 
         def go_back(e):
             main_content.content = home_screen
@@ -1074,6 +1104,7 @@ def main(page: ft.Page):
         def on_fav_click(e):
             added = toggle_favorite(db_conn, symbol, company_name, price)
             fav_icon.name = Icons.STAR if added else Icons.STAR_BORDER
+            fav_icon.color = GOLD if added else TEXT_MUTED
             refresh_watchlist_list()
             page.update()
 
@@ -1082,30 +1113,38 @@ def main(page: ft.Page):
 
         details_page = ft.Container(
             padding=20,
+            bgcolor=BG,
             content=ft.Column([
                 ft.Row([
-                    ft.IconButton(Icons.ARROW_BACK, on_click=go_back),
-                    ft.Text(f"{symbol} Details", size=24, weight=ft.FontWeight.BOLD),
+                    ft.IconButton(Icons.ARROW_BACK, icon_color=TEXT_PRIMARY, on_click=go_back),
+                    ft.Text(symbol, size=22, weight=ft.FontWeight.W_900, color=TEXT_PRIMARY),
                     ft.Row([
-                        ft.IconButton(Icons.COPY, on_click=on_copy_click, tooltip="Copy stock info"),
+                        ft.IconButton(Icons.COPY, icon_color=TEXT_SECONDARY, on_click=on_copy_click, tooltip="Copy stock info"),
                         ft.IconButton(content=fav_icon, on_click=on_fav_click, tooltip="Add/Remove Watchlist"),
                     ], spacing=0),
                 ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
-                ft.Divider(),
-                ft.Card(
-                    content=ft.Container(
-                        padding=20,
-                        content=ft.Column([
-                            ft.Text(f"Sector: {sector}", color=Colors.GREY_600),
-                            ft.Text(f"Price: Rs.{price:,.2f}" if price else "Price: not synced yet",
-                                    size=32, weight=ft.FontWeight.W_800),
-                            ft.Text(company_name, color=Colors.GREY_700),
-                        ]),
-                    )
+                ft.Container(height=10),
+                ft.Container(
+                    bgcolor=SURFACE, border_radius=18, border=ft.border.all(1, BORDER),
+                    padding=22,
+                    content=ft.Column([
+                        ft.Container(
+                            padding=ft.padding.symmetric(horizontal=8, vertical=3), border_radius=6,
+                            bgcolor=ACCENT_SOFT,
+                            content=ft.Text(sector, color=ACCENT, size=11, weight=ft.FontWeight.W_600),
+                        ),
+                        ft.Container(height=10),
+                        ft.Text(f"Rs.{price:,.2f}" if price else "Not synced yet",
+                                size=34, weight=ft.FontWeight.W_900, color=TEXT_PRIMARY),
+                        ft.Text(company_name, color=TEXT_SECONDARY, size=14),
+                    ]),
                 ),
+                ft.Container(height=16),
                 ft.ElevatedButton(
                     "Read News on Google",
                     icon=Icons.OPEN_IN_NEW,
+                    color=Colors.WHITE, bgcolor=ACCENT,
+                    style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=12), padding=16, elevation=0),
                     on_click=lambda e: page.launch_url(google_news_url(company_name)),
                 ),
             ]),
@@ -1113,18 +1152,24 @@ def main(page: ft.Page):
         main_content.content = details_page
         page.update()
 
+
     # ---------- HOME SCREEN ----------
     search_input = ft.TextField(
         hint_text="Search Stock (e.g. RELIANCE, TCS, RELAXO)",
+        hint_style=ft.TextStyle(color=TEXT_MUTED),
         prefix_icon=Icons.SEARCH,
-        border_radius=30,
+        border_radius=14,
         filled=True,
-        border_color=Colors.TRANSPARENT,
-        height=55,
-        text_size=16,
+        fill_color=SURFACE_ALT,
+        border_color=BORDER,
+        focused_border_color=ACCENT,
+        color=TEXT_PRIMARY,
+        cursor_color=ACCENT,
+        height=54,
+        text_size=15,
     )
 
-    result_column = ft.Column(spacing=8)
+    result_column = ft.Column(spacing=6)
     recent_list = ft.Column()
 
     def refresh_recent_list():
@@ -1134,8 +1179,8 @@ def main(page: ft.Page):
             recent_list.controls.append(
                 ft.Container(
                     content=ft.Row([
-                        ft.Icon(Icons.HISTORY, color=Colors.GREY_400),
-                        ft.Text("No recent searches", color=Colors.GREY_500),
+                        ft.Icon(Icons.HISTORY, color=TEXT_MUTED, size=18),
+                        ft.Text("No recent searches", color=TEXT_MUTED, size=13),
                     ]),
                     padding=10,
                 )
@@ -1143,10 +1188,15 @@ def main(page: ft.Page):
         else:
             for q in recents:
                 recent_list.controls.append(
-                    ft.ListTile(
-                        leading=ft.Icon(Icons.HISTORY),
-                        title=ft.Text(q),
-                        on_click=lambda e, q=q: run_search(q),
+                    ft.Container(
+                        border_radius=10,
+                        bgcolor=SURFACE,
+                        margin=ft.margin.only(bottom=6),
+                        content=ft.ListTile(
+                            leading=ft.Icon(Icons.HISTORY, color=TEXT_SECONDARY, size=18),
+                            title=ft.Text(q, color=TEXT_PRIMARY, size=14),
+                            on_click=lambda e, q=q: run_search(q),
+                        ),
                     )
                 )
 
@@ -1157,16 +1207,30 @@ def main(page: ft.Page):
             add_recent_search(db_conn, query)
             refresh_recent_list()
             for symbol, company_name, sector, price in results:
+                up = True
                 result_column.controls.append(
-                    ft.ListTile(
-                        leading=ft.Icon(Icons.SHOW_CHART),
-                        title=ft.Text(f"{symbol} - {company_name}"),
-                        subtitle=ft.Text(f"Rs.{price:,.2f}" if price else "Not synced yet"),
-                        on_click=lambda e, s=symbol, c=company_name, sec=sector, p=price: show_stock_details(s, c, sec, p),
+                    ft.Container(
+                        bgcolor=SURFACE,
+                        border_radius=12,
+                        border=ft.border.all(1, BORDER),
+                        content=ft.ListTile(
+                            leading=ft.Container(
+                                width=38, height=38, border_radius=10, bgcolor=ACCENT_SOFT,
+                                alignment=ft.alignment.center,
+                                content=ft.Icon(Icons.SHOW_CHART, color=ACCENT, size=18),
+                            ),
+                            title=ft.Text(symbol, color=TEXT_PRIMARY, weight=ft.FontWeight.BOLD, size=14),
+                            subtitle=ft.Text(company_name, color=TEXT_SECONDARY, size=12),
+                            trailing=ft.Text(
+                                f"Rs.{price:,.2f}" if price else "--",
+                                color=TEXT_PRIMARY, weight=ft.FontWeight.W_600, size=13,
+                            ),
+                            on_click=lambda e, s=symbol, c=company_name, sec=sector, p=price: show_stock_details(s, c, sec, p),
+                        ),
                     )
                 )
         else:
-            result_column.controls.append(ft.Text(f"No results found for '{query}'", color=Colors.GREY_500))
+            result_column.controls.append(ft.Text(f"No results found for '{query}'", color=TEXT_MUTED, size=13))
         page.update()
 
     def handle_search(e):
@@ -1176,13 +1240,13 @@ def main(page: ft.Page):
 
     search_input.on_submit = handle_search
 
-    sync_status_text = ft.Text(get_last_sync_display(db_conn), size=12, color=Colors.GREY)
+    sync_status_text = ft.Text(get_last_sync_display(db_conn), size=12, color=TEXT_SECONDARY)
 
     def on_update_market_data(e):
         update_button.disabled = True
         update_button.text = "Updating..."
         sync_status_text.value = "Starting sync..."
-        sync_status_text.color = Colors.GREY
+        sync_status_text.color = TEXT_SECONDARY
         page.update()
 
         def progress_callback(msg):
@@ -1192,7 +1256,7 @@ def main(page: ft.Page):
         def do_sync():
             msg, success = perform_full_market_sync(db_conn, progress_callback)
             sync_status_text.value = msg
-            sync_status_text.color = Colors.GREEN if success else Colors.RED
+            sync_status_text.color = GREEN if success else RED
             update_button.disabled = False
             update_button.text = "Update Market Data"
             # Real-time refresh: EVERY screen's data reflects the new sync immediately
@@ -1209,25 +1273,47 @@ def main(page: ft.Page):
         "Update Market Data",
         icon=Icons.REFRESH,
         on_click=on_update_market_data,
-        style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=15), padding=15),
+        color=Colors.WHITE,
+        bgcolor=ACCENT,
+        style=ft.ButtonStyle(
+            shape=ft.RoundedRectangleBorder(radius=14),
+            padding=18,
+            elevation=0,
+            text_style=ft.TextStyle(weight=ft.FontWeight.W_700, size=15),
+        ),
     )
 
     home_screen = ft.Container(
         expand=True,
         padding=20,
+        bgcolor=BG,
         content=ft.Column(
             [
-                ft.Container(height=20),
-                ft.Text("StockAI Pro", size=28, weight=ft.FontWeight.BOLD),
-                ft.Text("Market data ready for analysis", size=14, color=Colors.BLUE_600),
-                ft.Container(height=15),
+                ft.Container(height=14),
+                ft.Row([
+                    ft.Container(
+                        width=44, height=44, border_radius=12, bgcolor=SURFACE,
+                        border=ft.border.all(1, BORDER), alignment=ft.alignment.center,
+                        content=ft.Icon(CANDLE_ICON, color=ACCENT, size=22),
+                    ),
+                    ft.Column([
+                        ft.Text("StockAI PRO", size=24, weight=ft.FontWeight.W_900, color=TEXT_PRIMARY),
+                        ft.Text("Market data ready for analysis", size=12, color=TEXT_SECONDARY),
+                    ], spacing=0),
+                ], spacing=12),
+                ft.Container(height=18),
                 update_button,
-                sync_status_text,
-                ft.Container(height=15),
+                ft.Container(
+                    padding=ft.padding.only(top=6),
+                    content=sync_status_text,
+                ),
+                ft.Container(height=18),
                 search_input,
                 result_column,
-                ft.Container(height=30),
-                ft.Text("Recent Searches", size=18, weight=ft.FontWeight.W_700),
+                ft.Container(height=26),
+                ft.Text("RECENT SEARCHES", size=12, weight=ft.FontWeight.W_700, color=TEXT_MUTED,
+                        style=ft.TextStyle(letter_spacing=1.5)),
+                ft.Container(height=6),
                 recent_list,
             ],
             scroll=ft.ScrollMode.AUTO,
@@ -1244,44 +1330,50 @@ def main(page: ft.Page):
             news_list.controls.append(
                 ft.Text(
                     "No news yet. Tap 'Update Market Data' on Home to fetch today's top movers.",
-                    color=Colors.GREY_500,
+                    color=TEXT_MUTED,
                 )
             )
         else:
             for symbol, company_name, date, pct_change in items:
                 up = pct_change >= 0
-                color = Colors.GREEN if up else Colors.RED
+                color = GREEN if up else RED
                 news_list.controls.append(
                     ft.Container(
                         padding=15,
-                        border_radius=12,
-                        border=ft.border.all(1, Colors.GREY_300),
+                        border_radius=14,
+                        bgcolor=SURFACE,
+                        border=ft.border.all(1, BORDER),
                         content=ft.Column(
                             [
                                 ft.Row(
                                     [
                                         ft.Column(
                                             [
-                                                ft.Text(symbol, weight=ft.FontWeight.BOLD, size=15),
-                                                ft.Text(company_name, size=11, color=Colors.GREY_500),
+                                                ft.Text(symbol, weight=ft.FontWeight.BOLD, size=15, color=TEXT_PRIMARY),
+                                                ft.Text(company_name, size=11, color=TEXT_SECONDARY),
                                             ],
                                             spacing=0, expand=True,
                                         ),
-                                        ft.Text(f"{pct_change:+.2f}%", size=16, weight=ft.FontWeight.BOLD, color=color),
+                                        ft.Container(
+                                            padding=ft.padding.symmetric(horizontal=8, vertical=3),
+                                            border_radius=8, bgcolor=f"{color}22",
+                                            content=ft.Text(f"{pct_change:+.2f}%", size=14, weight=ft.FontWeight.BOLD, color=color),
+                                        ),
                                     ],
                                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                                 ),
-                                ft.Text(date, size=11, color=Colors.GREY_400),
+                                ft.Text(date, size=11, color=TEXT_MUTED),
                                 ft.Row(
                                     [
                                         ft.TextButton(
                                             "News",
                                             icon=Icons.OPEN_IN_NEW,
-                                            icon_color=Colors.BLUE_700,
+                                            icon_color=ACCENT,
+                                            style=ft.ButtonStyle(color=ACCENT),
                                             on_click=lambda e, c=company_name: page.launch_url(google_news_url(c)),
                                         ),
                                         ft.IconButton(
-                                            Icons.COPY, icon_size=16,
+                                            Icons.COPY, icon_size=16, icon_color=TEXT_MUTED,
                                             tooltip="Copy",
                                             on_click=lambda e, s=symbol, p=pct_change: copy_to_clipboard(
                                                 f"{s} {p:+.2f}%", "Stock"),
@@ -1298,10 +1390,12 @@ def main(page: ft.Page):
 
     news_screen = ft.Container(
         padding=20,
+        bgcolor=BG,
         content=ft.Column(
             [
-                ft.Text("Market Movers - News", size=24, weight=ft.FontWeight.BOLD),
-                ft.Text("Auto-clears after 7 days", size=12, color=Colors.GREY_500),
+                ft.Text("MARKET MOVERS - NEWS", size=20, weight=ft.FontWeight.W_900, color=TEXT_PRIMARY,
+                        style=ft.TextStyle(letter_spacing=1)),
+                ft.Text("Auto-clears after 7 days", size=12, color=TEXT_MUTED),
                 ft.Container(height=15),
                 news_list,
             ],
@@ -1330,26 +1424,35 @@ def main(page: ft.Page):
                         return _add
 
                     watchlist_search_results.controls.append(
-                        ft.ListTile(
-                            leading=ft.Icon(Icons.ADD_CIRCLE_OUTLINE, color=Colors.BLUE_700),
-                            title=ft.Text(symbol, weight=ft.FontWeight.BOLD, size=14),
-                            subtitle=ft.Text(company_name, size=12),
-                            on_click=make_add(symbol, company_name),
-                            dense=True,
+                        ft.Container(
+                            bgcolor=SURFACE, border_radius=10, margin=ft.margin.only(bottom=4),
+                            content=ft.ListTile(
+                                leading=ft.Icon(Icons.ADD_CIRCLE_OUTLINE, color=ACCENT, size=20),
+                                title=ft.Text(symbol, weight=ft.FontWeight.BOLD, size=14, color=TEXT_PRIMARY),
+                                subtitle=ft.Text(company_name, size=12, color=TEXT_SECONDARY),
+                                on_click=make_add(symbol, company_name),
+                                dense=True,
+                            ),
                         )
                     )
             else:
                 watchlist_search_results.controls.append(
-                    ft.Container(padding=10, content=ft.Text("No matches found", size=12, color=Colors.GREY_500))
+                    ft.Container(padding=10, content=ft.Text("No matches found", size=12, color=TEXT_MUTED))
                 )
         page.update()
 
     add_watchlist_input = ft.TextField(
         hint_text="Type any 3 letters - covers all ~2000 NSE stocks",
+        hint_style=ft.TextStyle(color=TEXT_MUTED, size=13),
         prefix_icon=Icons.SEARCH,
-        border_radius=25,
+        border_radius=14,
         filled=True,
-        height=48,
+        fill_color=SURFACE_ALT,
+        border_color=BORDER,
+        focused_border_color=ACCENT,
+        color=TEXT_PRIMARY,
+        cursor_color=ACCENT,
+        height=50,
         text_size=14,
         on_change=on_add_stock_search,
     )
@@ -1362,18 +1465,20 @@ def main(page: ft.Page):
                 ft.Container(
                     content=ft.Column(
                         [
-                            ft.Icon(Icons.STAR_BORDER, size=60, color=Colors.GREY_300),
-                            ft.Text("No stocks in your watchlist yet", color=Colors.GREY_500, weight=ft.FontWeight.W_600),
-                            ft.Text("Search a stock above and tap it to add.", size=12, color=Colors.GREY_500),
+                            ft.Icon(Icons.STAR_BORDER, size=54, color=TEXT_MUTED),
+                            ft.Text("No stocks in your watchlist yet", color=TEXT_SECONDARY, weight=ft.FontWeight.W_600, size=14),
+                            ft.Text("Search a stock above and tap it to add.", size=12, color=TEXT_MUTED),
                         ],
                         horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                        spacing=6,
                     ),
                     alignment=ft.alignment.center,
-                    padding=30,
+                    padding=36,
                 )
             )
         else:
-            for symbol, company_name, price, change_pct, last_updated in favs:
+            AVATAR_COLORS = [ACCENT, GOLD, GREEN, "#AB47BC", "#26C6DA", "#EF5350"]
+            for idx, (symbol, company_name, price, change_pct, last_updated) in enumerate(favs):
 
                 def make_remove(sym):
                     def _remove(e):
@@ -1384,69 +1489,80 @@ def main(page: ft.Page):
 
                 if price and change_pct is not None:
                     up = change_pct >= 0
-                    color = Colors.GREEN if up else Colors.RED
+                    color = GREEN if up else RED
                     prev_price = price / (1 + change_pct / 100) if (100 + change_pct) != 0 else price
                     change_amount = price - prev_price
                     right_block = ft.Column(
                         [
-                            ft.Text(f"{price:,.2f}", size=15, weight=ft.FontWeight.W_700),
-                            ft.Row(
-                                [
-                                    ft.Icon(Icons.ARROW_UPWARD if up else Icons.ARROW_DOWNWARD, size=11, color=color),
-                                    ft.Text(f"{change_amount:+,.2f} ({change_pct:+.2f}%)", size=12, color=color, weight=ft.FontWeight.W_600),
-                                ],
-                                spacing=2, tight=True,
+                            ft.Text(f"{price:,.2f}", size=15, weight=ft.FontWeight.W_700, color=TEXT_PRIMARY),
+                            ft.Container(
+                                padding=ft.padding.symmetric(horizontal=6, vertical=2),
+                                border_radius=6,
+                                bgcolor=f"{color}22",
+                                content=ft.Row(
+                                    [
+                                        ft.Icon(Icons.ARROW_UPWARD if up else Icons.ARROW_DOWNWARD, size=11, color=color),
+                                        ft.Text(f"{change_amount:+,.2f} ({change_pct:+.2f}%)", size=11, color=color, weight=ft.FontWeight.W_700),
+                                    ],
+                                    spacing=2, tight=True,
+                                ),
                             ),
                         ],
-                        horizontal_alignment=ft.CrossAxisAlignment.END, spacing=2, tight=True,
+                        horizontal_alignment=ft.CrossAxisAlignment.END, spacing=4, tight=True,
                     )
                 else:
-                    right_block = ft.Text("--", size=13, color=Colors.GREY_500)
+                    right_block = ft.Text("--", size=13, color=TEXT_MUTED)
 
-                # TradingView-style compact row: avatar + symbol/name on the
-                # left, price/change on the right, single line, no clutter.
-                # Tap the row to open full details (copy + news live there).
+                # TradingView-style compact premium card: avatar + symbol/name
+                # on the left, price/change on the right. Tap opens full
+                # details (copy + news live there).
                 watchlist_list.controls.append(
                     ft.Container(
-                        padding=ft.padding.symmetric(horizontal=8, vertical=10),
+                        padding=ft.padding.symmetric(horizontal=12, vertical=12),
+                        margin=ft.margin.only(bottom=8),
+                        bgcolor=SURFACE,
+                        border_radius=14,
+                        border=ft.border.all(1, BORDER),
                         on_click=lambda e, s=symbol, c=company_name, p=price: show_stock_details(s, c, "N/A", p or 0),
                         content=ft.Row(
                             [
                                 ft.CircleAvatar(
-                                    content=ft.Text(symbol[0] if symbol else "?", size=14, weight=ft.FontWeight.BOLD),
-                                    radius=17,
-                                    bgcolor=Colors.BLUE_GREY_700,
-                                    color=Colors.WHITE,
+                                    content=ft.Text(symbol[0] if symbol else "?", size=14, weight=ft.FontWeight.BOLD, color=Colors.WHITE),
+                                    radius=18,
+                                    bgcolor=AVATAR_COLORS[idx % len(AVATAR_COLORS)],
                                 ),
                                 ft.Column(
                                     [
-                                        ft.Text(symbol, weight=ft.FontWeight.BOLD, size=14, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
-                                        ft.Text(company_name, size=11, color=Colors.GREY_500, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                                        ft.Text(symbol, weight=ft.FontWeight.BOLD, size=14, color=TEXT_PRIMARY,
+                                                max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                                        ft.Text(company_name, size=11, color=TEXT_SECONDARY,
+                                                max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
                                     ],
-                                    spacing=0, expand=True, tight=True,
+                                    spacing=1, expand=True, tight=True,
                                 ),
                                 right_block,
-                                ft.IconButton(Icons.CLOSE, icon_size=15, on_click=make_remove(symbol)),
+                                ft.IconButton(Icons.CLOSE, icon_size=15, icon_color=TEXT_MUTED, on_click=make_remove(symbol)),
                             ],
                             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                            spacing=8,
+                            spacing=10,
                             vertical_alignment=ft.CrossAxisAlignment.CENTER,
                         ),
                     )
                 )
-                watchlist_list.controls.append(ft.Divider(height=1))
 
     watchlist_screen = ft.Container(
         padding=20,
+        bgcolor=BG,
         content=ft.Column(
             [
-                ft.Text("My Watchlist", size=24, weight=ft.FontWeight.BOLD),
-                ft.Text("Updates only when you tap 'Update Market Data' on Home", size=12, color=Colors.GREY_500),
-                ft.Container(height=15),
+                ft.Text("MY WATCHLIST", size=22, weight=ft.FontWeight.W_900, color=TEXT_PRIMARY,
+                        style=ft.TextStyle(letter_spacing=1)),
+                ft.Text("Updates only when you tap 'Update Market Data' on Home", size=12, color=TEXT_MUTED),
+                ft.Container(height=16),
                 add_watchlist_input,
                 watchlist_search_results,
-                ft.Container(height=15),
-                ft.Card(content=ft.Container(padding=10, content=watchlist_list)),
+                ft.Container(height=14),
+                watchlist_list,
             ],
             scroll=ft.ScrollMode.AUTO,
         ),
@@ -1455,50 +1571,57 @@ def main(page: ft.Page):
     # ---------- ANALYTICS SCREEN ----------
     def build_mover_row(rank, symbol, company_name, price, pct_change):
         up = pct_change >= 0
+        color = GREEN if up else RED
         return ft.Container(
-            padding=ft.padding.symmetric(horizontal=10, vertical=8),
+            padding=ft.padding.symmetric(horizontal=12, vertical=10),
+            margin=ft.margin.only(bottom=6),
+            bgcolor=SURFACE,
+            border_radius=12,
+            border=ft.border.all(1, BORDER),
             content=ft.Row(
                 [
                     ft.Container(
-                        content=ft.Text(str(rank), size=12, weight=ft.FontWeight.BOLD, color=Colors.WHITE),
-                        bgcolor=Colors.BLUE_GREY_400,
-                        width=24, height=24, border_radius=12,
+                        content=ft.Text(str(rank), size=12, weight=ft.FontWeight.BOLD, color=TEXT_PRIMARY),
+                        bgcolor=SURFACE_ALT,
+                        width=26, height=26, border_radius=13,
                         alignment=ft.alignment.center,
+                        border=ft.border.all(1, BORDER),
                     ),
                     ft.Column(
                         [
-                            ft.Text(symbol, weight=ft.FontWeight.BOLD, size=14),
-                            ft.Text(company_name, size=11, color=Colors.GREY_500),
+                            ft.Text(symbol, weight=ft.FontWeight.BOLD, size=14, color=TEXT_PRIMARY),
+                            ft.Text(company_name, size=11, color=TEXT_SECONDARY,
+                                    max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
                         ],
                         spacing=0, expand=True,
                     ),
                     ft.Column(
                         [
-                            ft.Text(f"Rs.{price:,.2f}", size=13, weight=ft.FontWeight.W_600),
-                            ft.Row(
-                                [
-                                    ft.Icon(
-                                        Icons.ARROW_UPWARD if up else Icons.ARROW_DOWNWARD,
-                                        size=12, color=Colors.GREEN if up else Colors.RED,
-                                    ),
-                                    ft.Text(f"{pct_change:+.2f}%", size=12,
-                                            color=Colors.GREEN if up else Colors.RED,
-                                            weight=ft.FontWeight.W_600),
-                                ],
-                                spacing=2,
+                            ft.Text(f"Rs.{price:,.2f}", size=13, weight=ft.FontWeight.W_700, color=TEXT_PRIMARY),
+                            ft.Container(
+                                padding=ft.padding.symmetric(horizontal=6, vertical=1),
+                                border_radius=6,
+                                bgcolor=f"{color}22",
+                                content=ft.Row(
+                                    [
+                                        ft.Icon(Icons.ARROW_UPWARD if up else Icons.ARROW_DOWNWARD, size=11, color=color),
+                                        ft.Text(f"{pct_change:+.2f}%", size=11, color=color, weight=ft.FontWeight.W_700),
+                                    ],
+                                    spacing=2, tight=True,
+                                ),
                             ),
                         ],
-                        horizontal_alignment=ft.CrossAxisAlignment.END, spacing=2,
+                        horizontal_alignment=ft.CrossAxisAlignment.END, spacing=3,
                     ),
                     ft.Column(
                         [
                             ft.IconButton(
-                                Icons.OPEN_IN_NEW, icon_size=15,
+                                Icons.OPEN_IN_NEW, icon_size=15, icon_color=ACCENT,
                                 tooltip="News",
                                 on_click=lambda e, c=company_name: page.launch_url(google_news_url(c)),
                             ),
                             ft.IconButton(
-                                Icons.COPY, icon_size=15,
+                                Icons.COPY, icon_size=15, icon_color=TEXT_MUTED,
                                 tooltip="Copy",
                                 on_click=lambda e, s=symbol, p=price, pc=pct_change: copy_to_clipboard(
                                     f"{s} Rs.{p:,.2f} ({pc:+.2f}%)", "Stock"),
@@ -1513,25 +1636,28 @@ def main(page: ft.Page):
         )
 
     def build_mover_section(rows):
-        body = ft.Column(spacing=2)
+        body = ft.Column(spacing=0)
         if not rows:
             body.controls.append(
-                ft.Text("No data yet. Tap 'Update Market Data' on Home.", color=Colors.GREY_500, size=12)
+                ft.Text("No data yet. Tap 'Update Market Data' on Home.", color=TEXT_MUTED, size=12)
             )
         else:
-            for i, row in enumerate(rows):
+            for row in rows:
                 rank, symbol, company_name, price, pct_change = row
                 body.controls.append(build_mover_row(rank, symbol, company_name, price, pct_change))
-                if i < len(rows) - 1:
-                    body.controls.append(ft.Divider(height=1))
         return body
 
     # selected: None means neither list is shown (per your sketch: date + two
     # boxes, only the tapped one opens up). selected_date: None = latest.
     mover_state = {"selected": None, "selected_date": None}
-    analytics_date_text = ft.Text("No data synced yet", size=13, color=Colors.GREY_500)
-    analytics_list_body = ft.Column(spacing=2)
-    analytics_date_dropdown = ft.Dropdown(label="Date", options=[], visible=False, width=180)
+    analytics_date_text = ft.Text("No data synced yet", size=13, color=TEXT_SECONDARY, weight=ft.FontWeight.W_600)
+    analytics_list_body = ft.Column(spacing=0)
+    analytics_date_dropdown = ft.Dropdown(
+        label="Date", options=[], visible=False, width=170,
+        border_radius=10, bgcolor=SURFACE_ALT, border_color=BORDER,
+        focused_border_color=ACCENT, color=TEXT_PRIMARY, text_size=13,
+        label_style=ft.TextStyle(color=TEXT_MUTED, size=12),
+    )
 
     def render_mover_list():
         mtype = mover_state["selected"]
@@ -1540,7 +1666,7 @@ def main(page: ft.Page):
         if mtype is None:
             analytics_date_text.value = "Tap 'Top 10 Gainers' or 'Top 10 Losers' to view"
             analytics_list_body.controls.append(
-                ft.Text("Nothing selected yet.", color=Colors.GREY_500, size=12)
+                ft.Text("Nothing selected yet.", color=TEXT_MUTED, size=12)
             )
             return
 
@@ -1567,37 +1693,51 @@ def main(page: ft.Page):
 
     analytics_date_dropdown.on_change = on_date_change
 
+    def _pill_style(bgcolor, color):
+        return ft.ButtonStyle(
+            shape=ft.RoundedRectangleBorder(radius=12),
+            padding=14,
+            elevation=0,
+            text_style=ft.TextStyle(weight=ft.FontWeight.W_700, size=14),
+        )
+
     def select_gainers(e):
         # Tap again to hide it (per your request: click to show, otherwise don't show)
         if mover_state["selected"] == "gainer":
             mover_state["selected"] = None
-            gainer_btn.bgcolor = Colors.GREY_200
-            gainer_btn.color = Colors.BLACK
+            gainer_btn.bgcolor = SURFACE_ALT
+            gainer_btn.color = TEXT_SECONDARY
         else:
             mover_state["selected"] = "gainer"
-            gainer_btn.bgcolor = Colors.GREEN
+            gainer_btn.bgcolor = GREEN
             gainer_btn.color = Colors.WHITE
-            loser_btn.bgcolor = Colors.GREY_200
-            loser_btn.color = Colors.BLACK
+            loser_btn.bgcolor = SURFACE_ALT
+            loser_btn.color = TEXT_SECONDARY
         render_mover_list()
         page.update()
 
     def select_losers(e):
         if mover_state["selected"] == "loser":
             mover_state["selected"] = None
-            loser_btn.bgcolor = Colors.GREY_200
-            loser_btn.color = Colors.BLACK
+            loser_btn.bgcolor = SURFACE_ALT
+            loser_btn.color = TEXT_SECONDARY
         else:
             mover_state["selected"] = "loser"
-            loser_btn.bgcolor = Colors.RED
+            loser_btn.bgcolor = RED
             loser_btn.color = Colors.WHITE
-            gainer_btn.bgcolor = Colors.GREY_200
-            gainer_btn.color = Colors.BLACK
+            gainer_btn.bgcolor = SURFACE_ALT
+            gainer_btn.color = TEXT_SECONDARY
         render_mover_list()
         page.update()
 
-    gainer_btn = ft.ElevatedButton("Top 10 Gainers", bgcolor=Colors.GREY_200, color=Colors.BLACK, on_click=select_gainers, expand=True)
-    loser_btn = ft.ElevatedButton("Top 10 Losers", bgcolor=Colors.GREY_200, color=Colors.BLACK, on_click=select_losers, expand=True)
+    gainer_btn = ft.ElevatedButton(
+        "Top 10 Gainers", bgcolor=SURFACE_ALT, color=TEXT_SECONDARY,
+        on_click=select_gainers, expand=True, style=_pill_style(SURFACE_ALT, TEXT_SECONDARY),
+    )
+    loser_btn = ft.ElevatedButton(
+        "Top 10 Losers", bgcolor=SURFACE_ALT, color=TEXT_SECONDARY,
+        on_click=select_losers, expand=True, style=_pill_style(SURFACE_ALT, TEXT_SECONDARY),
+    )
 
     def refresh_analytics_screen():
         refresh_date_dropdown()
@@ -1605,24 +1745,25 @@ def main(page: ft.Page):
 
     analytics_screen = ft.Container(
         padding=20,
+        bgcolor=BG,
         content=ft.Column(
             [
-                ft.Text("Analytics Dashboard", size=24, weight=ft.FontWeight.BOLD),
-                ft.Container(height=10),
-                ft.Card(
-                    content=ft.Container(
-                        padding=15,
-                        content=ft.Column(
-                            [
-                                ft.Row([analytics_date_text, analytics_date_dropdown],
-                                       alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
-                                ft.Container(height=10),
-                                ft.Row([gainer_btn, loser_btn], spacing=10),
-                                ft.Divider(),
-                                analytics_list_body,
-                            ]
-                        ),
-                    )
+                ft.Text("ANALYTICS DASHBOARD", size=20, weight=ft.FontWeight.W_900, color=TEXT_PRIMARY,
+                        style=ft.TextStyle(letter_spacing=1)),
+                ft.Container(height=14),
+                ft.Container(
+                    bgcolor=SURFACE, border_radius=16, border=ft.border.all(1, BORDER),
+                    padding=16,
+                    content=ft.Column(
+                        [
+                            ft.Row([analytics_date_text, analytics_date_dropdown],
+                                   alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                            ft.Container(height=12),
+                            ft.Row([gainer_btn, loser_btn], spacing=10),
+                            ft.Container(height=12),
+                            analytics_list_body,
+                        ]
+                    ),
                 ),
             ],
             scroll=ft.ScrollMode.AUTO,
@@ -1630,7 +1771,7 @@ def main(page: ft.Page):
     )
 
     # ---------- SETTINGS SCREEN ----------
-    status_text = ft.Text("")
+    status_text = ft.Text("", color=TEXT_SECONDARY, size=12)
 
     def on_backup(e):
         status_text.value = backup_database()
@@ -1652,6 +1793,39 @@ def main(page: ft.Page):
             page.theme_mode = ft.ThemeMode.SYSTEM
         page.update()
 
+    def _input_style(**kwargs):
+        base = dict(
+            border_radius=10, filled=True, fill_color=SURFACE_ALT,
+            border_color=BORDER, focused_border_color=ACCENT,
+            color=TEXT_PRIMARY, cursor_color=ACCENT,
+            label_style=ft.TextStyle(color=TEXT_MUTED),
+        )
+        base.update(kwargs)
+        return base
+
+    def _premium_button(text, icon=None, on_click=None, primary=True):
+        return ft.ElevatedButton(
+            text, icon=icon, on_click=on_click,
+            color=Colors.WHITE if primary else TEXT_PRIMARY,
+            bgcolor=ACCENT if primary else SURFACE_ALT,
+            style=ft.ButtonStyle(
+                shape=ft.RoundedRectangleBorder(radius=12), padding=14, elevation=0,
+                text_style=ft.TextStyle(weight=ft.FontWeight.W_600, size=13),
+            ),
+        )
+
+    def _section_card(title, subtitle, children):
+        col = [ft.Text(title, size=15, weight=ft.FontWeight.W_700, color=TEXT_PRIMARY)]
+        if subtitle:
+            col.append(ft.Text(subtitle, size=12, color=TEXT_MUTED))
+        col.append(ft.Container(height=10))
+        col.extend(children)
+        return ft.Container(
+            bgcolor=SURFACE, border_radius=16, border=ft.border.all(1, BORDER),
+            padding=18, margin=ft.margin.only(bottom=14),
+            content=ft.Column(col, spacing=10),
+        )
+
     theme_dropdown = ft.Dropdown(
         label="App Theme",
         value=stored_theme,
@@ -1661,6 +1835,7 @@ def main(page: ft.Page):
             ft.dropdown.Option("dark", "Dark"),
         ],
         on_change=on_theme_change,
+        **_input_style(),
     )
 
     def on_dhan_save(e):
@@ -1668,55 +1843,55 @@ def main(page: ft.Page):
         set_setting(db_conn, "dhan_access_token", (dhan_token_input.value or "").strip())
         set_setting(db_conn, "dhan_scrip_fetched_date", "")  # force re-fetch of scrip master next sync
         dhan_status_text.value = "Dhan credentials saved."
-        dhan_status_text.color = Colors.GREEN
+        dhan_status_text.color = GREEN
         page.update()
 
     dhan_client_input = ft.TextField(
         label="Dhan Client ID",
         value=get_setting(db_conn, "dhan_client_id", ""),
-        border_radius=10,
+        **_input_style(),
     )
     dhan_token_input = ft.TextField(
         label="Dhan Access Token",
         value=get_setting(db_conn, "dhan_access_token", ""),
         password=True,
         can_reveal_password=True,
-        border_radius=10,
+        **_input_style(),
     )
-    dhan_status_text = ft.Text("", size=12)
+    dhan_status_text = ft.Text("", size=12, color=TEXT_SECONDARY)
 
     # ---- Telegram auto-notifications ----
     telegram_phone_input = ft.TextField(
         label="Your Telegram Phone Number (for your reference)",
         value=get_setting(db_conn, "telegram_phone_number", ""),
-        border_radius=10,
         hint_text="+91XXXXXXXXXX",
+        **_input_style(),
     )
     telegram_token_input = ft.TextField(
         label="Telegram Bot Token (from @BotFather)",
         value=get_setting(db_conn, "telegram_bot_token", ""),
         password=True,
         can_reveal_password=True,
-        border_radius=10,
+        **_input_style(),
     )
     telegram_status_text = ft.Text(
         "Connected" if get_setting(db_conn, "telegram_chat_id") else "Not connected yet",
         size=12,
-        color=Colors.GREEN if get_setting(db_conn, "telegram_chat_id") else Colors.GREY_500,
+        color=GREEN if get_setting(db_conn, "telegram_chat_id") else TEXT_MUTED,
     )
 
     def on_telegram_save(e):
         set_setting(db_conn, "telegram_phone_number", (telegram_phone_input.value or "").strip())
         set_setting(db_conn, "telegram_bot_token", (telegram_token_input.value or "").strip())
         telegram_status_text.value = "Bot Token saved. Now send /start to your bot on Telegram, then tap 'Connect My Telegram'."
-        telegram_status_text.color = Colors.BLUE_700
+        telegram_status_text.color = ACCENT
         page.update()
 
     def on_telegram_connect(e):
         token = (telegram_token_input.value or "").strip()
         if not token:
             telegram_status_text.value = "Save your Bot Token first."
-            telegram_status_text.color = Colors.RED
+            telegram_status_text.color = RED
             page.update()
             return
         connect_btn.disabled = True
@@ -1725,18 +1900,18 @@ def main(page: ft.Page):
         chat_id, msg = fetch_telegram_chat_id(token)
         if chat_id:
             set_setting(db_conn, "telegram_chat_id", chat_id)
-            telegram_status_text.color = Colors.GREEN
+            telegram_status_text.color = GREEN
         else:
-            telegram_status_text.color = Colors.RED
+            telegram_status_text.color = RED
         telegram_status_text.value = msg
         connect_btn.disabled = False
         connect_btn.text = "Connect My Telegram"
         page.update()
 
-    connect_btn = ft.ElevatedButton("Connect My Telegram", icon=Icons.SEND, on_click=on_telegram_connect)
+    connect_btn = _premium_button("Connect My Telegram", Icons.SEND, on_telegram_connect, primary=False)
 
     # ---- Full market universe / market-cap ranking controls ----
-    universe_status_text = ft.Text("", size=12, color=Colors.GREY_600)
+    universe_status_text = ft.Text("", size=12, color=TEXT_MUTED)
 
     def on_scan_universe(e):
         scan_universe_btn.disabled = True
@@ -1750,22 +1925,18 @@ def main(page: ft.Page):
         def do_scan():
             universe = fetch_full_market_universe(db_conn, progress_callback)
             universe_status_text.value = f"Search index now covers {len(universe)} NSE stocks."
-            universe_status_text.color = Colors.GREEN
+            universe_status_text.color = GREEN
             scan_universe_btn.disabled = False
             scan_universe_btn.text = "Scan Full Market (~2000 stocks)"
             page.update()
 
         threading.Thread(target=do_scan, daemon=True).start()
 
-    scan_universe_btn = ft.ElevatedButton(
-        "Scan Full Market (~2000 stocks)",
-        icon=Icons.TRAVEL_EXPLORE,
-        on_click=on_scan_universe,
-    )
+    scan_universe_btn = _premium_button("Scan Full Market (~2000 stocks)", Icons.TRAVEL_EXPLORE, on_scan_universe, primary=False)
 
     market_cap_status_text = ft.Text(
         f"Last updated: {get_setting(db_conn, 'market_cap_last_updated', 'never')}",
-        size=12, color=Colors.GREY_600,
+        size=12, color=TEXT_MUTED,
     )
 
     def on_fetch_market_caps(e):
@@ -1785,83 +1956,102 @@ def main(page: ft.Page):
 
         threading.Thread(target=do_fetch, daemon=True).start()
 
-    cap_btn = ft.ElevatedButton(
-        "Update Market-Cap Ranking (Slow)",
-        icon=Icons.LEADERBOARD,
-        on_click=on_fetch_market_caps,
-    )
+    cap_btn = _premium_button("Update Market-Cap Ranking (Slow)", Icons.LEADERBOARD, on_fetch_market_caps, primary=False)
 
     settings_screen = ft.Container(
         padding=20,
+        bgcolor=BG,
         content=ft.Column(
             [
-                ft.Text("Settings", size=28, weight=ft.FontWeight.BOLD),
-                ft.Container(height=15),
-                ft.Text("Appearance", size=18, weight=ft.FontWeight.W_600),
-                theme_dropdown,
-                ft.Container(height=20),
-                ft.Text("Stock Search Coverage", size=18, weight=ft.FontWeight.W_600),
-                ft.Text(
-                    "Runs automatically on every 'Update Market Data' - use this only if you "
-                    "want to refresh the search index without doing a full market sync.",
-                    size=12, color=Colors.GREY_500,
+                ft.Text("SETTINGS", size=22, weight=ft.FontWeight.W_900, color=TEXT_PRIMARY,
+                        style=ft.TextStyle(letter_spacing=1)),
+                ft.Container(height=16),
+
+                _section_card("Appearance", None, [theme_dropdown]),
+
+                _section_card(
+                    "Stock Search Coverage", None,
+                    [
+                        ft.Text(
+                            "Runs automatically on every 'Update Market Data' - use this only if "
+                            "you want to refresh the search index without a full sync.",
+                            size=12, color=TEXT_MUTED,
+                        ),
+                        scan_universe_btn, universe_status_text,
+                        ft.Divider(color=BORDER, height=20),
+                        ft.Text(
+                            "Ranks search & analytics by market capitalisation. Scans stocks one "
+                            "by one (no free bulk source exists) so it can take 15-30+ minutes - "
+                            "run occasionally, not every day.",
+                            size=12, color=TEXT_MUTED,
+                        ),
+                        cap_btn, market_cap_status_text,
+                    ],
                 ),
-                scan_universe_btn,
-                universe_status_text,
-                ft.Container(height=10),
-                ft.Text(
-                    "Ranks search results and analytics by market capitalisation. "
-                    "This scans stocks one by one (no free bulk source exists) so it can take "
-                    "15-30+ minutes for the full list - run it occasionally, not every day.",
-                    size=12, color=Colors.GREY_500,
+
+                _section_card(
+                    "Dhan API", "Fastest, most reliable data source",
+                    [
+                        ft.Text(
+                            "Free: open a Dhan account, generate an Access Token from web.dhan.co. "
+                            "Leave blank to use free public sources instead (slower). "
+                            "Fallback order: Dhan -> NSE live -> Yahoo Finance full scan.",
+                            size=12, color=TEXT_MUTED,
+                        ),
+                        dhan_client_input, dhan_token_input,
+                        _premium_button("Save Dhan Credentials", None, on_dhan_save),
+                        dhan_status_text,
+                    ],
                 ),
-                cap_btn,
-                market_cap_status_text,
-                ft.Container(height=20),
-                ft.Text("Dhan API (fastest, most reliable data source)", size=18, weight=ft.FontWeight.W_600),
-                ft.Text(
-                    "Free to get: open a Dhan account, then generate an Access Token from web.dhan.co. "
-                    "Leave blank to use free public data sources instead (slower). "
-                    "Fallback order: Dhan API -> NSE live data -> Yahoo Finance full scan.",
-                    size=12, color=Colors.GREY_500,
+
+                _section_card(
+                    "Telegram Auto-Updates", "Gainers/losers (text + PDF) sent automatically every sync",
+                    [
+                        ft.Text(
+                            "One-time setup:\n"
+                            "1. Message @BotFather on Telegram -> /newbot -> copy the Bot Token.\n"
+                            "2. Send any message (e.g. /start) to your new bot.\n"
+                            "3. Tap 'Connect My Telegram' - no manual step needed again after that.",
+                            size=12, color=TEXT_MUTED,
+                        ),
+                        telegram_phone_input, telegram_token_input,
+                        ft.Row([_premium_button("Save Bot Token", None, on_telegram_save), connect_btn], spacing=10),
+                        telegram_status_text,
+                    ],
                 ),
-                dhan_client_input,
-                dhan_token_input,
-                ft.ElevatedButton("Save Dhan Credentials", on_click=on_dhan_save),
-                dhan_status_text,
-                ft.Container(height=20),
-                ft.Text("Telegram Auto-Updates", size=18, weight=ft.FontWeight.W_600),
-                ft.Text(
-                    "Gainers/losers (text + PDF) will be sent to your Telegram automatically "
-                    "every time market data is updated. One-time setup:\n"
-                    "1. Message @BotFather on Telegram -> /newbot -> copy the Bot Token below.\n"
-                    "2. Send any message (e.g. /start) to your new bot on Telegram.\n"
-                    "3. Tap 'Connect My Telegram' below - after that, no manual step is ever needed again.",
-                    size=12, color=Colors.GREY_500,
+
+                _section_card(
+                    "Database Management", None,
+                    [
+                        ft.Container(
+                            bgcolor=SURFACE_ALT, border_radius=10,
+                            content=ft.ListTile(
+                                leading=ft.Icon(Icons.BACKUP, color=ACCENT),
+                                title=ft.Text("Backup Database", color=TEXT_PRIMARY, size=14),
+                                on_click=on_backup,
+                            ),
+                        ),
+                        ft.Container(
+                            bgcolor=SURFACE_ALT, border_radius=10,
+                            content=ft.ListTile(
+                                leading=ft.Icon(Icons.DELETE_FOREVER, color=RED),
+                                title=ft.Text("Clear Search History", color=TEXT_PRIMARY, size=14),
+                                on_click=on_clear,
+                            ),
+                        ),
+                        status_text,
+                    ],
                 ),
-                telegram_phone_input,
-                telegram_token_input,
-                ft.Row([
-                    ft.ElevatedButton("Save Bot Token", on_click=on_telegram_save),
-                    connect_btn,
-                ], spacing=10),
-                telegram_status_text,
-                ft.Container(height=20),
-                ft.Text("Database Management", size=18, weight=ft.FontWeight.W_600),
-                ft.Card(content=ft.Column([
-                    ft.ListTile(leading=ft.Icon(Icons.BACKUP), title=ft.Text("Backup Database"), on_click=on_backup),
-                    ft.ListTile(leading=ft.Icon(Icons.DELETE_FOREVER), title=ft.Text("Clear Search History"), on_click=on_clear, icon_color=Colors.RED),
-                ])),
-                ft.Container(height=10),
-                status_text,
-                ft.Container(height=20),
-                ft.Text("App Info", size=18, weight=ft.FontWeight.W_600),
-                ft.Card(content=ft.Container(padding=15, content=ft.Column([
-                    ft.Text("Version: 2.0.0 (StockAI Pro)"),
-                    ft.Text("Database: Local SQLite"),
-                    ft.Text("Data source order: Dhan API -> NSE live data -> Yahoo Finance (full scan fallback)"),
-                    ft.Text("Search coverage: full NSE universe (~2000 stocks)"),
-                ]))),
+
+                _section_card(
+                    "App Info", None,
+                    [
+                        ft.Text("Version: 2.0.0 (StockAI Pro)", size=12, color=TEXT_SECONDARY),
+                        ft.Text("Database: Local SQLite", size=12, color=TEXT_SECONDARY),
+                        ft.Text("Data source order: Dhan API -> NSE live -> Yahoo Finance (fallback)", size=12, color=TEXT_SECONDARY),
+                        ft.Text("Search coverage: full NSE universe (~2000 stocks)", size=12, color=TEXT_SECONDARY),
+                    ],
+                ),
             ],
             scroll=ft.ScrollMode.AUTO,
         ),
@@ -1884,6 +2074,10 @@ def main(page: ft.Page):
     bottom_nav = ft.NavigationBar(
         selected_index=0,
         on_change=change_tab,
+        bgcolor=SURFACE,
+        indicator_color=ACCENT_SOFT,
+        shadow_color=Colors.TRANSPARENT,
+        surface_tint_color=Colors.TRANSPARENT,
         destinations=[
             ft.NavigationBarDestination(icon=Icons.HOME_OUTLINED, selected_icon=Icons.HOME, label="Home"),
             ft.NavigationBarDestination(icon=Icons.ARTICLE_OUTLINED, selected_icon=Icons.ARTICLE, label="News"),
@@ -1898,16 +2092,21 @@ def main(page: ft.Page):
 
     password_input = ft.TextField(
         hint_text="Enter Password",
+        hint_style=ft.TextStyle(color=TEXT_MUTED),
         password=True,
         can_reveal_password=True,
-        border_radius=30,
+        border_radius=14,
         filled=True,
-        border_color=Colors.TRANSPARENT,
+        fill_color=SURFACE_ALT,
+        border_color=BORDER,
+        focused_border_color=ACCENT,
+        color=TEXT_PRIMARY,
+        cursor_color=ACCENT,
         height=55,
         text_align=ft.TextAlign.CENTER,
         width=260,
     )
-    password_error = ft.Text("", color=Colors.RED, size=13)
+    password_error = ft.Text("", color=RED, size=13)
 
     def background_auto_sync():
         try:
@@ -1972,16 +2171,27 @@ def main(page: ft.Page):
 
     password_screen = ft.Container(
         expand=True,
+        bgcolor=BG,
         alignment=ft.alignment.center,
         content=ft.Column(
             [
-                ft.Icon(Icons.LOCK, size=70, color=Colors.BLUE_700),
-                ft.Text("StockAI Pro", size=28, weight=ft.FontWeight.BOLD),
-                ft.Text("Enter password to continue", size=14, color=Colors.GREY_500),
-                ft.Container(height=20),
+                ft.Container(
+                    content=ft.Icon(Icons.LOCK, size=54, color=ACCENT),
+                    padding=20, bgcolor=SURFACE, border_radius=20,
+                    border=ft.border.all(1, BORDER),
+                ),
+                ft.Container(height=18),
+                ft.Text("StockAI PRO", size=26, weight=ft.FontWeight.W_900, color=TEXT_PRIMARY,
+                        style=ft.TextStyle(letter_spacing=1.5)),
+                ft.Text("Enter password to continue", size=13, color=TEXT_SECONDARY),
+                ft.Container(height=24),
                 password_input,
-                ft.Container(height=10),
-                ft.ElevatedButton("OK", on_click=check_password, width=260),
+                ft.Container(height=12),
+                ft.ElevatedButton(
+                    "OK", on_click=check_password, width=260,
+                    color=Colors.WHITE, bgcolor=ACCENT,
+                    style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=14), padding=16, elevation=0),
+                ),
                 ft.Container(height=8),
                 password_error,
             ],
