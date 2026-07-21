@@ -7,9 +7,6 @@ import threading
 import time
 import shutil
 
-# Optional: only needed for the "send PDF to Telegram" feature.
-# If it's not installed, the app still works - PDF sending is just skipped
-# and a text-only Telegram message is sent instead.
 try:
     from reportlab.lib.pagesizes import A4
     from reportlab.pdfgen import canvas as pdf_canvas
@@ -18,7 +15,7 @@ except ImportError:
     REPORTLAB_AVAILABLE = False
 
 # ==========================================
-# COMPATIBILITY SHIMS (works on old & new Flet)
+# COMPATIBILITY SHIMS 
 # ==========================================
 try:
     Icons = ft.Icons
@@ -31,28 +28,22 @@ except AttributeError:
     Colors = ft.colors
 
 # ==========================================
-# PREMIUM DARK THEME (TradingView-style palette)
+# PREMIUM DARK THEME
 # ==========================================
-BG = "#0B0E14"            # app background - near-black
-SURFACE = "#151922"        # cards / rows
-SURFACE_ALT = "#1C212C"    # inputs, secondary surfaces
-BORDER = "#252B38"         # hairline borders
-ACCENT = "#2962FF"         # TradingView blue - primary actions / links
-ACCENT_SOFT = "#1E2A4A"    # accent used as a subtle fill
-GREEN = "#26A69A"          # gains
-RED = "#EF5350"            # losses
+BG = "#0B0E14"            
+SURFACE = "#151922"        
+SURFACE_ALT = "#1C212C"    
+BORDER = "#252B38"         
+ACCENT = "#2962FF"         
+ACCENT_SOFT = "#1E2A4A"    
+GREEN = "#26A69A"          
+RED = "#EF5350"            
 TEXT_PRIMARY = "#E8EAED"
 TEXT_SECONDARY = "#8B93A7"
 TEXT_MUTED = "#5C6470"
-GOLD = "#F0B90B"           # premium highlight accent
+GOLD = "#F0B90B"           
 CANDLE_ICON = getattr(Icons, "CANDLESTICK_CHART", None) or Icons.SHOW_CHART
 
-# ==========================================
-# FALLBACK STOCK LIST
-# Used only if EVERY live fetch (NSE full list, NSE Nifty500 list, and
-# both caches) fails - e.g. the very first run with no internet at all.
-# This keeps the app usable even when nothing can be downloaded.
-# ==========================================
 FALLBACK_UNIVERSE = [
     ("RELIANCE", "Reliance Industries"), ("TCS", "Tata Consultancy Services"),
     ("HDFCBANK", "HDFC Bank"), ("ICICIBANK", "ICICI Bank"), ("INFY", "Infosys"),
@@ -75,8 +66,7 @@ FALLBACK_UNIVERSE = [
 ]
 
 NSE_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
     "Accept": "text/csv,application/csv,*/*",
 }
 
@@ -85,6 +75,8 @@ NSE_HEADERS = {
 # ==========================================
 def init_db():
     conn = sqlite3.connect("stockai_pro.db", check_same_thread=False)
+    # FIX: Enable WAL mode to prevent "database is locked" errors during multi-threaded background syncs
+    conn.execute("PRAGMA journal_mode=WAL;")
     cursor = conn.cursor()
 
     cursor.execute('''CREATE TABLE IF NOT EXISTS recent_searches (
@@ -131,12 +123,10 @@ def init_db():
                         key TEXT PRIMARY KEY,
                         value TEXT)''')
 
-    # Full NSE universe (~2000 stocks) - replaces the old Nifty500-only cache
     cursor.execute('''CREATE TABLE IF NOT EXISTS nse_universe_cache (
                         symbol TEXT PRIMARY KEY,
                         company_name TEXT)''')
 
-    # Kept for backward-compatible fallback (smaller Nifty500 list)
     cursor.execute('''CREATE TABLE IF NOT EXISTS nifty500_cache (
                         symbol TEXT PRIMARY KEY,
                         company_name TEXT)''')
@@ -145,7 +135,6 @@ def init_db():
                         symbol TEXT PRIMARY KEY,
                         security_id TEXT)''')
 
-    # Safe migration: add new columns if they don't exist yet
     for coldef in ("change_pct REAL", "last_updated TEXT"):
         try:
             cursor.execute(f"ALTER TABLE favorites ADD COLUMN {coldef}")
@@ -166,26 +155,21 @@ def init_db():
     conn.commit()
     return conn
 
-
 def get_setting(conn, key, default=None):
     cursor = conn.cursor()
     cursor.execute("SELECT value FROM app_settings WHERE key=?", (key,))
     row = cursor.fetchone()
     return row[0] if row else default
 
-
 def set_setting(conn, key, value):
     cursor = conn.cursor()
     cursor.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)", (key, str(value)))
     conn.commit()
 
-
 # ==========================================
-# FULL NSE MARKET UNIVERSE (~2000 stocks, fetched live, cached, with fallback)
+# FETCH FUNCTIONS
 # ==========================================
 def _fetch_nifty500_only(conn):
-    """Smaller backup list (~500 stocks) - used only if the full ~2000
-    stock equity list can't be reached but the Nifty500 endpoint can."""
     cursor = conn.cursor()
     try:
         session = requests.Session()
@@ -216,27 +200,7 @@ def _fetch_nifty500_only(conn):
         pass
     return None
 
-
 def fetch_full_market_universe(conn, progress_callback=None):
-    """
-    Builds the complete searchable stock universe (all NSE main-board
-    equities - roughly 2000 stocks, not just the Nifty 500). This is
-    what makes ANY stock searchable/addable to the watchlist, not just
-    large caps.
-
-    Order of attempts:
-      1. NSE's official full equity list (EQUITY_L.csv) -> ~2000 stocks
-      2. NSE Nifty 500 list (smaller backup, in case the full list URL
-         is temporarily blocked)
-      3. Whatever was cached from a previous successful fetch (full
-         universe cache, then the smaller Nifty500 cache)
-      4. A small fixed FALLBACK_UNIVERSE (only if there's truly no
-         internet and no prior cache at all)
-
-    Every symbol found is also upserted into stock_master, so the
-    normal search box and the watchlist "add stock" search both pick
-    it up automatically - no separate code path needed.
-    """
     cursor = conn.cursor()
     try:
         if progress_callback:
@@ -252,7 +216,6 @@ def fetch_full_market_universe(conn, progress_callback=None):
         symbols = []
         for line in lines:
             parts = [p.strip().strip('"') for p in line.split(",")]
-            # EQUITY_L.csv columns: SYMBOL, NAME OF COMPANY, SERIES, ...
             if len(parts) >= 2 and parts[0]:
                 symbols.append((parts[0], parts[1]))
         if len(symbols) >= 500:
@@ -272,14 +235,12 @@ def fetch_full_market_universe(conn, progress_callback=None):
     except Exception:
         pass
 
-    # Attempt 2: smaller Nifty500 backup
     n500 = _fetch_nifty500_only(conn)
     if n500:
         if progress_callback:
             progress_callback(f"Loaded {len(n500)} Nifty500 stocks (full list unavailable).")
         return n500
 
-    # Attempt 3: caches from a previous successful run
     cursor.execute("SELECT symbol, company_name FROM nse_universe_cache")
     cached = cursor.fetchall()
     if cached:
@@ -288,22 +249,9 @@ def fetch_full_market_universe(conn, progress_callback=None):
     cached2 = cursor.fetchall()
     if cached2:
         return cached2
-
-    # Last resort: small fixed list
     return FALLBACK_UNIVERSE
 
-
 def fetch_market_caps(conn, progress_callback=None, limit=None):
-    """
-    Best-effort market-cap enrichment so search / analytics can be
-    ranked by market capitalisation (top-2000-by-market-cap). There is
-    no single free bulk market-cap feed for the whole NSE universe, so
-    this fetches it stock-by-stock via yfinance. For ~2000 stocks this
-    is genuinely slow (can take 15-30+ minutes) - it's a manual action
-    in Settings, not something run automatically on every sync. Results
-    are cached in stock_master.market_cap and reused until you run it
-    again.
-    """
     cursor = conn.cursor()
     cursor.execute("SELECT symbol FROM stock_master ORDER BY symbol")
     symbols = [r[0] for r in cursor.fetchall()]
@@ -339,7 +287,6 @@ def fetch_market_caps(conn, progress_callback=None, limit=None):
         progress_callback(f"Market cap scan complete: {updated}/{total} stocks updated.")
     return updated
 
-
 def search_stock_db(conn, query):
     cursor = conn.cursor()
     cursor.execute(
@@ -350,18 +297,15 @@ def search_stock_db(conn, query):
     )
     return cursor.fetchall()
 
-
 def add_recent_search(conn, query, search_type="stock"):
     cursor = conn.cursor()
     cursor.execute("INSERT INTO recent_searches (query, search_type) VALUES (?, ?)", (query, search_type))
     conn.commit()
 
-
 def get_recent_searches(conn, limit=5):
     cursor = conn.cursor()
     cursor.execute("SELECT query FROM recent_searches ORDER BY timestamp DESC LIMIT ?", (limit,))
     return [row[0] for row in cursor.fetchall()]
-
 
 def add_to_watchlist(conn, symbol, company_name):
     cursor = conn.cursor()
@@ -371,12 +315,10 @@ def add_to_watchlist(conn, symbol, company_name):
     )
     conn.commit()
 
-
 def remove_from_watchlist(conn, symbol):
     cursor = conn.cursor()
     cursor.execute("DELETE FROM favorites WHERE symbol=?", (symbol,))
     conn.commit()
-
 
 def toggle_favorite(conn, symbol, company_name, price):
     cursor = conn.cursor()
@@ -392,12 +334,10 @@ def toggle_favorite(conn, symbol, company_name, price):
     conn.commit()
     return True
 
-
 def get_favorites(conn):
     cursor = conn.cursor()
     cursor.execute("SELECT symbol, company_name, latest_price FROM favorites")
     return cursor.fetchall()
-
 
 def get_favorites_full(conn):
     cursor = conn.cursor()
@@ -405,7 +345,6 @@ def get_favorites_full(conn):
         "SELECT symbol, company_name, latest_price, change_pct, last_updated FROM favorites ORDER BY symbol"
     )
     return cursor.fetchall()
-
 
 def get_last_sync_display(conn):
     cursor = conn.cursor()
@@ -415,7 +354,6 @@ def get_last_sync_display(conn):
         return f"Last updated: {row[0]} at {row[1]}"
     return "Not synced yet. Tap 'Update Market Data'."
 
-
 def is_market_open():
     now = datetime.now()
     if now.weekday() >= 5:
@@ -424,14 +362,10 @@ def is_market_open():
     close_time = now.replace(hour=15, minute=30, second=0, microsecond=0)
     return open_time <= now <= close_time
 
-
 def get_available_mover_dates(conn):
-    """All dates we have saved gainer/loser data for, newest first -
-    powers the date picker so old days' data stays browsable."""
     cursor = conn.cursor()
     cursor.execute("SELECT DISTINCT date FROM market_movers ORDER BY date DESC")
     return [row[0] for row in cursor.fetchall()]
-
 
 def get_market_movers(conn, mover_type, date=None):
     cursor = conn.cursor()
@@ -448,7 +382,6 @@ def get_market_movers(conn, mover_type, date=None):
     )
     return cursor.fetchall(), date
 
-
 def get_news_items(conn):
     cursor = conn.cursor()
     cursor.execute("DELETE FROM news_items WHERE date < date('now', '-7 days')")
@@ -459,19 +392,11 @@ def get_news_items(conn):
     )
     return cursor.fetchall()
 
-
 def google_news_url(company_name):
     query = company_name.replace(" ", "+")
     return f"https://news.google.com/search?q={query}%20share%20price&hl=en-IN&gl=IN&ceid=IN:en"
 
-
 def fetch_dhan_scrip_master(conn):
-    """
-    Downloads Dhan's instrument master (maps trading symbols to Dhan's
-    internal security IDs, required for their market data API) and
-    caches it. Only needs to run once in a while - the mapping barely
-    changes day to day.
-    """
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*) FROM dhan_scrip_cache")
     if cursor.fetchone()[0] > 0:
@@ -515,16 +440,7 @@ def fetch_dhan_scrip_master(conn):
     cursor.execute("SELECT COUNT(*) FROM dhan_scrip_cache")
     return cursor.fetchone()[0] > 0
 
-
 def fetch_top_movers_from_dhan(conn, name_lookup):
-    """
-    PRIORITY 1: Uses the authenticated DhanHQ market data API (requires
-    a free Dhan account + API access token, set in Settings) to fetch
-    OHLC data for the whole stock universe and compute Top 10
-    Gainers/Losers. This is the most reliable source since it's an
-    official, authenticated broker API.
-    Returns (gainers, losers, data_date) or (None, None, None).
-    """
     client_id = get_setting(conn, "dhan_client_id")
     access_token = get_setting(conn, "dhan_access_token")
     if not client_id or not access_token:
@@ -599,15 +515,7 @@ def fetch_top_movers_from_dhan(conn, name_lookup):
     except Exception:
         return None, None, None
 
-
 def fetch_top_movers_from_nse(name_lookup):
-    """
-    PRIORITY 2: Fetches pre-computed top gainers/losers directly from
-    NSE's live market-movers endpoint (the same data source behind
-    nseindia.com and most broker apps' 'Top Gainers/Losers' pages).
-    Much faster than downloading the whole universe ourselves.
-    Returns (gainers, losers, data_date) or (None, None, None).
-    """
     try:
         session = requests.Session()
         session.get("https://www.nseindia.com/market-data/top-gainers-losers", headers=NSE_HEADERS, timeout=10)
@@ -627,8 +535,6 @@ def fetch_top_movers_from_nse(name_lookup):
         data_l = resp_l.json()
 
         def extract(payload):
-            # "allSec" = All Securities on NSE, the broadest live-movers list
-            # NSE publishes for this feed.
             rows = payload.get("allSec", {}).get("data", [])
             out = []
             for r in rows:
@@ -655,18 +561,7 @@ def fetch_top_movers_from_nse(name_lookup):
     except Exception:
         return None, None, None
 
-
 def perform_full_market_sync(conn, progress_callback=None):
-    """
-    Refreshes EVERYTHING in the app in one go: the full ~2000 stock
-    search index, Top 10 Gainers / Losers (saved per-date so history
-    stays browsable), the watchlist, and the news feed.
-
-    Fallback chain (unchanged priority, kept in this order):
-      1. Dhan API (authenticated broker feed - fastest & most reliable)
-      2. NSE live top-movers endpoint
-      3. Full universe scan via yfinance (slowest, last resort)
-    """
     try:
         if progress_callback:
             progress_callback("Refreshing full stock search index...")
@@ -712,7 +607,6 @@ def perform_full_market_sync(conn, progress_callback=None):
         for m in movers_by_symbol.values():
             cursor.execute("UPDATE stock_master SET price=? WHERE symbol=?", (m["price"], m["symbol"]))
 
-        # Update watchlist with latest price / change
         cursor.execute("SELECT symbol FROM favorites")
         fav_symbols = [row[0] for row in cursor.fetchall()]
         sync_timestamp = datetime.now().strftime("%d %b %Y, %H:%M")
@@ -727,13 +621,18 @@ def perform_full_market_sync(conn, progress_callback=None):
                 for s in missing_fav_symbols:
                     ns = f"{s}.NS"
                     try:
+                        # FIX: Robust Multi-Index DataFrame handling for YFinance updates
                         if len(missing_fav_symbols) > 1:
                             try:
-                                closes = fav_data[ns]["Close"].dropna()
-                            except Exception:
                                 closes = fav_data["Close"][ns].dropna()
+                            except Exception:
+                                try:
+                                    closes = fav_data[ns]["Close"].dropna()
+                                except Exception:
+                                    continue
                         else:
                             closes = fav_data["Close"].dropna()
+                            
                         if len(closes) >= 2:
                             last_close = float(closes.iloc[-1])
                             prev_close = float(closes.iloc[-2])
@@ -752,7 +651,6 @@ def perform_full_market_sync(conn, progress_callback=None):
                     (m["price"], m["pct_change"], sync_timestamp, symbol),
                 )
 
-        # News feed: union of gainers / losers (no duplicates)
         seen = set()
         news_entries = []
         for lst in (gainers, losers):
@@ -782,11 +680,6 @@ def perform_full_market_sync(conn, progress_callback=None):
 
 
 def _scan_full_universe_for_movers(conn, universe, progress_callback=None):
-    """
-    PRIORITY 3 (last resort): downloads price data for the whole stock
-    universe ourselves and computes top gainers/losers manually.
-    Slower (can take a few minutes for ~2000 stocks).
-    """
     symbols_only = [s for s, _ in universe]
     name_lookup = {s: n for s, n in universe}
     tickers = [f"{s}.NS" for s in symbols_only]
@@ -808,9 +701,12 @@ def _scan_full_universe_for_movers(conn, universe, progress_callback=None):
             symbol = ns_symbol.replace(".NS", "")
             try:
                 try:
-                    closes = data[ns_symbol]["Close"].dropna()
-                except Exception:
                     closes = data["Close"][ns_symbol].dropna()
+                except Exception:
+                    try:
+                        closes = data[ns_symbol]["Close"].dropna()
+                    except Exception:
+                        continue
                 if len(closes) < 2:
                     continue
                 last_close = float(closes.iloc[-1])
@@ -840,14 +736,12 @@ def _scan_full_universe_for_movers(conn, universe, progress_callback=None):
     losers = sorted(movers, key=lambda m: m["pct_change"])[:10]
     return gainers, losers, data_date
 
-
 def backup_database():
     try:
         shutil.copy("stockai_pro.db", "stockai_backup.db")
         return "Backup Successful!"
     except Exception as e:
         return f"Backup Failed: {e}"
-
 
 def clear_cache(conn):
     try:
@@ -858,10 +752,6 @@ def clear_cache(conn):
     except Exception as e:
         return f"Clear Failed: {e}"
 
-
-# ==========================================
-# TELEGRAM NOTIFICATIONS (gainers/losers auto-sent after every sync)
-# ==========================================
 def send_telegram_message(bot_token, chat_id, text):
     try:
         resp = requests.post(
@@ -872,7 +762,6 @@ def send_telegram_message(bot_token, chat_id, text):
         return resp.ok
     except Exception:
         return False
-
 
 def send_telegram_document(bot_token, chat_id, file_path, caption=""):
     try:
@@ -887,16 +776,7 @@ def send_telegram_document(bot_token, chat_id, file_path, caption=""):
     except Exception:
         return False
 
-
 def fetch_telegram_chat_id(bot_token):
-    """
-    Telegram never lets a bot message someone using just a phone number
-    (spam protection) - this is a platform rule that applies to every
-    bot ever made, not something specific to this app. The one-time
-    workaround: the user sends any message (e.g. /start) to their own
-    bot once, and we read that message back to learn their chat id.
-    After that, no further manual step is ever needed again.
-    """
     try:
         resp = requests.get(f"https://api.telegram.org/bot{bot_token}/getUpdates", timeout=15)
         resp.raise_for_status()
@@ -914,7 +794,6 @@ def fetch_telegram_chat_id(bot_token):
     except Exception as e:
         return None, f"Failed: {e}"
 
-
 def build_movers_text_message(gainers, losers, data_date):
     lines = ["<b>StockAI Pro - Market Movers</b>", f"Date: {data_date}", "", "<b>Top Gainers</b>"]
     for i, m in enumerate(gainers[:10], 1):
@@ -924,7 +803,6 @@ def build_movers_text_message(gainers, losers, data_date):
     for i, m in enumerate(losers[:10], 1):
         lines.append(f"{i}. {m['symbol']} - Rs.{m['price']:,.2f} ({m['pct_change']:+.2f}%)")
     return "\n".join(lines)
-
 
 def generate_movers_pdf(gainers, losers, data_date, path="movers_report.pdf"):
     if not REPORTLAB_AVAILABLE:
@@ -974,14 +852,7 @@ def generate_movers_pdf(gainers, losers, data_date, path="movers_report.pdf"):
     except Exception:
         return None
 
-
 def send_telegram_movers_update(conn, progress_callback=None):
-    """
-    Sends the latest saved gainers/losers as a Telegram text message,
-    plus a PDF report if reportlab is installed, to the chat id saved
-    in Settings. Does nothing (silently) if Telegram isn't configured -
-    this is an optional feature, not required for the app to work.
-    """
     bot_token = get_setting(conn, "telegram_bot_token")
     chat_id = get_setting(conn, "telegram_chat_id")
     if not bot_token or not chat_id:
@@ -1040,7 +911,6 @@ def main(page: ft.Page):
 
     main_content = ft.Container(expand=True, bgcolor=BG)
 
-    # ---------- CLIPBOARD COPY HELPER ----------
     def copy_to_clipboard(text, label="Text"):
         page.set_clipboard(text)
         page.snack_bar = ft.SnackBar(
@@ -1050,7 +920,6 @@ def main(page: ft.Page):
         page.snack_bar.open = True
         page.update()
 
-    # ---------- SPLASH SCREEN ----------
     splash_screen = ft.Container(
         expand=True,
         bgcolor=BG,
@@ -1075,7 +944,6 @@ def main(page: ft.Page):
         ),
     )
 
-    # ---------- ERROR SCREEN ----------
     def show_error_screen(message):
         main_content.content = ft.Container(
             expand=True,
@@ -1092,7 +960,6 @@ def main(page: ft.Page):
         )
         page.update()
 
-    # ---------- STOCK DETAILS PAGE ----------
     def show_stock_details(symbol, company_name, sector, price):
         is_fav = any(f[0] == symbol for f in get_favorites(db_conn))
         fav_icon = ft.Icon(Icons.STAR if is_fav else Icons.STAR_BORDER, color=GOLD if is_fav else TEXT_MUTED)
@@ -1152,8 +1019,6 @@ def main(page: ft.Page):
         main_content.content = details_page
         page.update()
 
-
-    # ---------- HOME SCREEN ----------
     search_input = ft.TextField(
         hint_text="Search Stock (e.g. RELIANCE, TCS, RELAXO)",
         hint_style=ft.TextStyle(color=TEXT_MUTED),
@@ -1207,7 +1072,6 @@ def main(page: ft.Page):
             add_recent_search(db_conn, query)
             refresh_recent_list()
             for symbol, company_name, sector, price in results:
-                up = True
                 result_column.controls.append(
                     ft.Container(
                         bgcolor=SURFACE,
@@ -1259,7 +1123,6 @@ def main(page: ft.Page):
             sync_status_text.color = GREEN if success else RED
             update_button.disabled = False
             update_button.text = "Update Market Data"
-            # Real-time refresh: EVERY screen's data reflects the new sync immediately
             refresh_watchlist_list()
             refresh_news_screen()
             refresh_analytics_screen()
@@ -1320,7 +1183,6 @@ def main(page: ft.Page):
         ),
     )
 
-    # ---------- NEWS SCREEN ----------
     news_list = ft.Column(spacing=10)
 
     def refresh_news_screen():
@@ -1403,7 +1265,6 @@ def main(page: ft.Page):
         ),
     )
 
-    # ---------- WATCHLIST SCREEN ----------
     watchlist_list = ft.Column(spacing=0)
     watchlist_search_results = ft.Column(spacing=0)
 
@@ -1513,9 +1374,6 @@ def main(page: ft.Page):
                 else:
                     right_block = ft.Text("--", size=13, color=TEXT_MUTED)
 
-                # TradingView-style compact premium card: avatar + symbol/name
-                # on the left, price/change on the right. Tap opens full
-                # details (copy + news live there).
                 watchlist_list.controls.append(
                     ft.Container(
                         padding=ft.padding.symmetric(horizontal=12, vertical=12),
@@ -1568,7 +1426,6 @@ def main(page: ft.Page):
         ),
     )
 
-    # ---------- ANALYTICS SCREEN ----------
     def build_mover_row(rank, symbol, company_name, price, pct_change):
         up = pct_change >= 0
         color = GREEN if up else RED
@@ -1647,8 +1504,6 @@ def main(page: ft.Page):
                 body.controls.append(build_mover_row(rank, symbol, company_name, price, pct_change))
         return body
 
-    # selected: None means neither list is shown (per your sketch: date + two
-    # boxes, only the tapped one opens up). selected_date: None = latest.
     mover_state = {"selected": None, "selected_date": None}
     analytics_date_text = ft.Text("No data synced yet", size=13, color=TEXT_SECONDARY, weight=ft.FontWeight.W_600)
     analytics_list_body = ft.Column(spacing=0)
@@ -1702,7 +1557,6 @@ def main(page: ft.Page):
         )
 
     def select_gainers(e):
-        # Tap again to hide it (per your request: click to show, otherwise don't show)
         if mover_state["selected"] == "gainer":
             mover_state["selected"] = None
             gainer_btn.bgcolor = SURFACE_ALT
@@ -1770,7 +1624,6 @@ def main(page: ft.Page):
         ),
     )
 
-    # ---------- SETTINGS SCREEN ----------
     status_text = ft.Text("", color=TEXT_SECONDARY, size=12)
 
     def on_backup(e):
@@ -1841,7 +1694,7 @@ def main(page: ft.Page):
     def on_dhan_save(e):
         set_setting(db_conn, "dhan_client_id", (dhan_client_input.value or "").strip())
         set_setting(db_conn, "dhan_access_token", (dhan_token_input.value or "").strip())
-        set_setting(db_conn, "dhan_scrip_fetched_date", "")  # force re-fetch of scrip master next sync
+        set_setting(db_conn, "dhan_scrip_fetched_date", "") 
         dhan_status_text.value = "Dhan credentials saved."
         dhan_status_text.color = GREEN
         page.update()
@@ -1860,7 +1713,6 @@ def main(page: ft.Page):
     )
     dhan_status_text = ft.Text("", size=12, color=TEXT_SECONDARY)
 
-    # ---- Telegram auto-notifications ----
     telegram_phone_input = ft.TextField(
         label="Your Telegram Phone Number (for your reference)",
         value=get_setting(db_conn, "telegram_phone_number", ""),
@@ -1910,7 +1762,6 @@ def main(page: ft.Page):
 
     connect_btn = _premium_button("Connect My Telegram", Icons.SEND, on_telegram_connect, primary=False)
 
-    # ---- Full market universe / market-cap ranking controls ----
     universe_status_text = ft.Text("", size=12, color=TEXT_MUTED)
 
     def on_scan_universe(e):
@@ -2057,7 +1908,6 @@ def main(page: ft.Page):
         ),
     )
 
-    # ---------- BOTTOM NAVIGATION ----------
     screens = [home_screen, news_screen, watchlist_screen, analytics_screen, settings_screen]
 
     def change_tab(e):
@@ -2087,7 +1937,6 @@ def main(page: ft.Page):
         ],
     )
 
-    # ---------- PASSWORD LOCK SCREEN ----------
     APP_PASSWORD = "8707352902"
 
     password_input = ft.TextField(
@@ -2135,8 +1984,6 @@ def main(page: ft.Page):
     def load_home():
         try:
             time.sleep(2)
-            # Populate the full ~2000 stock search index right away, so
-            # search/watchlist-add works even before the user taps Sync.
             def universe_progress(msg):
                 sync_status_text.value = msg
                 page.update()
@@ -2200,10 +2047,11 @@ def main(page: ft.Page):
         ),
     )
 
-    # ---------- INITIAL RENDER: PASSWORD FIRST ----------
+    # ---------- FIX: PREVENT INITIAL BLACK SCREEN ----------
     main_content.content = password_screen
     page.add(main_content)
-
+    # Explicity call page.update() after adding controls in main
+    page.update()
 
 if __name__ == "__main__":
     ft.app(target=main)
