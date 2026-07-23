@@ -2340,7 +2340,7 @@ def main(page: ft.Page):
     cap_btn = _premium_button("Update Market-Cap Ranking (Slow)", Icons.LEADERBOARD, on_fetch_market_caps, primary=False)
 
     # ---- Profit Growth screener manual trigger ----
-   def on_scan_profit_growth(e):
+    def on_scan_profit_growth(e):
         pg_scan_btn.disabled = True
         pg_scan_btn.text = "Scanning..."
         page.update()
@@ -2597,4 +2597,4 @@ def main(page: ft.Page):
 
 
 if __name__ == "__main__":
-    ft.app(target=main) 
+    ft.app(target=main)
