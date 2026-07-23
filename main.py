@@ -6,6 +6,7 @@ from datetime import datetime
 import threading
 import time
 import shutil
+import urllib.parse
 
 # Optional: only needed for the "send PDF to Telegram" feature.
 # If it's not installed, the app still works - PDF sending is just skipped
@@ -1162,6 +1163,68 @@ def run_profit_growth_scan_if_due(conn, progress_callback=None):
 
 
 # ==========================================
+# LIVE INDEX QUOTES (NIFTY 50 / BANK NIFTY) - Groww-style ticker bar
+# ==========================================
+def fetch_index_quotes():
+    """
+    Live price when the market's open, last close when it's shut -
+    either way this always returns the most recent available quote.
+    Returns {"NIFTY 50": (price, change, pct_change), "BANK NIFTY": (...)}
+    with (None, None, None) for any index that couldn't be fetched.
+    """
+    result = {}
+    for label, ticker in (("NIFTY 50", "^NSEI"), ("BANK NIFTY", "^NSEBANK")):
+        try:
+            hist = yf.Ticker(ticker).history(period="5d")
+            closes = hist["Close"].dropna()
+            if len(closes) >= 2:
+                last = float(closes.iloc[-1])
+                prev = float(closes.iloc[-2])
+                change = last - prev
+                pct = (change / prev * 100) if prev else 0.0
+                result[label] = (round(last, 2), round(change, 2), round(pct, 2))
+            else:
+                result[label] = (None, None, None)
+        except Exception:
+            result[label] = (None, None, None)
+    return result
+
+
+# ==========================================
+# TRADINGVIEW CHART EMBED (falls back gracefully if WebView isn't available)
+# ==========================================
+def build_tradingview_chart_url(symbol):
+    tv_symbol = urllib.parse.quote(f"NSE:{symbol}")
+    html = f"""<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1">
+<style>html,body{{margin:0;padding:0;height:100%;background:#0B0E14;}}</style></head>
+<body><div class="tradingview-widget-container" style="height:100%;width:100%">
+<div id="tv_chart_container" style="height:100%;width:100%"></div>
+<script src="https://s3.tradingview.com/tv.js"></script>
+<script>
+new TradingView.widget({{
+  "autosize": true,
+  "symbol": "NSE:{symbol}",
+  "interval": "D",
+  "timezone": "Asia/Kolkata",
+  "theme": "dark",
+  "style": "1",
+  "locale": "in",
+  "toolbar_bg": "#151922",
+  "enable_publishing": false,
+  "hide_top_toolbar": false,
+  "save_image": false,
+  "container_id": "tv_chart_container"
+}});
+</script>
+</div></body></html>"""
+    return "data:text/html;charset=utf-8," + urllib.parse.quote(html)
+
+
+def tradingview_web_url(symbol):
+    return f"https://www.tradingview.com/chart/?symbol=NSE:{symbol}"
+
+
+# ==========================================
 # 2. MAIN APPLICATION
 # ==========================================
 def main(page: ft.Page):
@@ -1290,10 +1353,49 @@ def main(page: ft.Page):
                     style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=12), padding=16, elevation=0),
                     on_click=lambda e: page.launch_url(google_news_url(company_name)),
                 ),
-            ]),
+                ft.Container(height=16),
+                ft.Text("LIVE CHART", size=12, weight=ft.FontWeight.W_700, color=TEXT_MUTED,
+                        style=ft.TextStyle(letter_spacing=1.5)),
+                ft.Container(height=8),
+                build_chart_container(symbol),
+            ], scroll=ft.ScrollMode.AUTO),
         )
         main_content.content = details_page
         page.update()
+
+    def build_chart_container(symbol):
+        """TradingView's free embeddable widget shown in an in-app WebView.
+        Falls back to an 'Open Chart' browser button if WebView isn't
+        supported on this build/device."""
+        try:
+            chart_view = ft.WebView(
+                url=build_tradingview_chart_url(symbol),
+                on_page_started=lambda e: None,
+            )
+            return ft.Container(
+                height=420, border_radius=16, border=ft.border.all(1, BORDER),
+                clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
+                content=chart_view,
+            )
+        except Exception:
+            return ft.Container(
+                height=160, border_radius=16, bgcolor=SURFACE, border=ft.border.all(1, BORDER),
+                alignment=ft.alignment.center,
+                content=ft.Column(
+                    [
+                        ft.Icon(Icons.SHOW_CHART, size=36, color=TEXT_MUTED),
+                        ft.Text("In-app chart isn't supported on this device.", size=12, color=TEXT_MUTED),
+                        ft.ElevatedButton(
+                            "Open Chart on TradingView",
+                            icon=Icons.OPEN_IN_NEW,
+                            color=Colors.WHITE, bgcolor=ACCENT,
+                            style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=12), elevation=0),
+                            on_click=lambda e, s=symbol: page.launch_url(tradingview_web_url(s)),
+                        ),
+                    ],
+                    horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=8,
+                ),
+            )
 
 
     # ---------- HOME SCREEN ----------
@@ -1383,58 +1485,100 @@ def main(page: ft.Page):
 
     search_input.on_submit = handle_search
 
-    sync_status_text = ft.Text(get_last_sync_display(db_conn), size=12, color=TEXT_SECONDARY)
+    market_status_text = ft.Text("Connecting...", size=11, color=TEXT_MUTED)
+    nifty_price_text = ft.Text("--", size=16, weight=ft.FontWeight.W_800, color=TEXT_PRIMARY)
+    nifty_change_text = ft.Text("", size=11, color=TEXT_MUTED)
+    banknifty_price_text = ft.Text("--", size=16, weight=ft.FontWeight.W_800, color=TEXT_PRIMARY)
+    banknifty_change_text = ft.Text("", size=11, color=TEXT_MUTED)
 
-    def on_update_market_data(e):
-        update_button.disabled = True
-        update_button.text = "Updating..."
-        sync_status_text.value = "Starting sync..."
-        sync_status_text.color = TEXT_SECONDARY
+    def _index_tile(label, price_ctrl, change_ctrl):
+        return ft.Container(
+            expand=True, bgcolor=SURFACE, border_radius=14, border=ft.border.all(1, BORDER),
+            padding=12,
+            content=ft.Column(
+                [
+                    ft.Text(label, size=11, color=TEXT_MUTED, weight=ft.FontWeight.W_600),
+                    price_ctrl,
+                    change_ctrl,
+                ],
+                spacing=2,
+            ),
+        )
+
+    index_ticker_row = ft.Row(
+        [
+            _index_tile("NIFTY 50", nifty_price_text, nifty_change_text),
+            _index_tile("BANK NIFTY", banknifty_price_text, banknifty_change_text),
+        ],
+        spacing=10,
+    )
+
+    # ---------- AUTOMATIC LIVE REFRESH (only runs while the app is open) ----------
+    auto_refresh_stop = {"stop": False}
+
+    def update_index_ticker():
+        quotes = fetch_index_quotes()
+        for label, price_ctrl, change_ctrl in (
+            ("NIFTY 50", nifty_price_text, nifty_change_text),
+            ("BANK NIFTY", banknifty_price_text, banknifty_change_text),
+        ):
+            price, change, pct = quotes.get(label, (None, None, None))
+            if price is not None:
+                price_ctrl.value = f"{price:,.2f}"
+                up = change >= 0
+                change_ctrl.value = f"{change:+,.2f} ({pct:+.2f}%)"
+                change_ctrl.color = GREEN if up else RED
+            else:
+                price_ctrl.value = "--"
+                change_ctrl.value = "Unavailable"
+                change_ctrl.color = TEXT_MUTED
+        market_status_text.value = (
+            f"LIVE - updated {datetime.now().strftime('%H:%M:%S')}" if is_market_open()
+            else f"Market Closed - last close, updated {datetime.now().strftime('%H:%M:%S')}"
+        )
+        market_status_text.color = GREEN if is_market_open() else TEXT_MUTED
         page.update()
 
-        def progress_callback(msg):
-            sync_status_text.value = msg
-            page.update()
+    def auto_refresh_loop():
+        last_full_sync = 0.0
+        while not auto_refresh_stop["stop"]:
+            try:
+                update_index_ticker()
+            except Exception:
+                pass
 
-        def do_sync():
-            msg, success = perform_full_market_sync(db_conn, progress_callback)
-            sync_status_text.value = msg
-            sync_status_text.color = GREEN if success else RED
-            update_button.disabled = False
-            update_button.text = "Update Market Data"
-            # Real-time refresh: EVERY screen's data reflects the new sync immediately
-            refresh_watchlist_list()
-            refresh_news_screen()
-            refresh_analytics_screen()
-            page.update()
-            if success:
-                send_telegram_movers_update(db_conn, progress_callback)
-                # Profit Growth scan is slow (~2000 stocks, 2 API calls each) -
-                # runs once/day in its OWN thread so it never blocks the quick sync.
-                def do_profit_growth_scan():
-                    def pg_progress(m):
-                        profit_growth_status_text.value = m
+            try:
+                now_ts = time.time()
+                interval = 60 if is_market_open() else 300
+                if now_ts - last_full_sync > interval:
+                    msg, success = perform_full_market_sync(db_conn, None)
+                    if success:
+                        refresh_watchlist_list()
+                        refresh_news_screen()
+                        refresh_analytics_screen()
                         page.update()
-                    run_profit_growth_scan_if_due(db_conn, pg_progress)
-                    refresh_analytics_screen()
-                    page.update()
-                threading.Thread(target=do_profit_growth_scan, daemon=True).start()
+                        send_telegram_movers_update(db_conn, None)
 
-        threading.Thread(target=do_sync, daemon=True).start()
+                        def pg_progress(m):
+                            profit_growth_status_text.value = m
+                            page.update()
+                        threading.Thread(
+                            target=lambda: run_profit_growth_scan_if_due(db_conn, pg_progress),
+                            daemon=True,
+                        ).start()
+                    last_full_sync = now_ts
+            except Exception:
+                pass
 
-    update_button = ft.ElevatedButton(
-        "Update Market Data",
-        icon=Icons.REFRESH,
-        on_click=on_update_market_data,
-        color=Colors.WHITE,
-        bgcolor=ACCENT,
-        style=ft.ButtonStyle(
-            shape=ft.RoundedRectangleBorder(radius=14),
-            padding=18,
-            elevation=0,
-            text_style=ft.TextStyle(weight=ft.FontWeight.W_700, size=15),
-        ),
-    )
+            for _ in range(15):
+                if auto_refresh_stop["stop"]:
+                    break
+                time.sleep(1)
+
+    def stop_auto_refresh(e=None):
+        auto_refresh_stop["stop"] = True
+
+    page.on_disconnect = stop_auto_refresh
 
     home_screen = ft.Container(
         expand=True,
@@ -1451,15 +1595,11 @@ def main(page: ft.Page):
                     ),
                     ft.Column([
                         ft.Text("StockAI PRO", size=24, weight=ft.FontWeight.W_900, color=TEXT_PRIMARY),
-                        ft.Text("Market data ready for analysis", size=12, color=TEXT_SECONDARY),
+                        market_status_text,
                     ], spacing=0),
                 ], spacing=12),
-                ft.Container(height=18),
-                update_button,
-                ft.Container(
-                    padding=ft.padding.only(top=6),
-                    content=sync_status_text,
-                ),
+                ft.Container(height=16),
+                index_ticker_row,
                 ft.Container(height=18),
                 search_input,
                 result_column,
@@ -2200,7 +2340,7 @@ def main(page: ft.Page):
     cap_btn = _premium_button("Update Market-Cap Ranking (Slow)", Icons.LEADERBOARD, on_fetch_market_caps, primary=False)
 
     # ---- Profit Growth screener manual trigger ----
-    def on_scan_profit_growth(e):
+   def on_scan_profit_growth(e):
         pg_scan_btn.disabled = True
         pg_scan_btn.text = "Scanning..."
         page.update()
@@ -2381,45 +2521,13 @@ def main(page: ft.Page):
     )
     password_error = ft.Text("", color=RED, size=13)
 
-    def background_auto_sync():
-        try:
-            last_sync = get_setting(db_conn, "last_auto_sync_date")
-            now = datetime.now()
-            today_str = now.strftime("%Y-%m-%d")
-            if now.hour >= 16 and last_sync != today_str:
-                def progress_callback(msg):
-                    sync_status_text.value = msg
-                    page.update()
-
-                msg, success = perform_full_market_sync(db_conn, progress_callback)
-                if success:
-                    set_setting(db_conn, "last_auto_sync_date", today_str)
-                sync_status_text.value = msg
-                sync_status_text.color = Colors.GREEN if success else Colors.RED
-                refresh_watchlist_list()
-                refresh_news_screen()
-                refresh_analytics_screen()
-                page.update()
-                if success:
-                    send_telegram_movers_update(db_conn, progress_callback)
-                    def do_profit_growth_scan():
-                        def pg_progress(m):
-                            profit_growth_status_text.value = m
-                            page.update()
-                        run_profit_growth_scan_if_due(db_conn, pg_progress)
-                        refresh_analytics_screen()
-                        page.update()
-                    threading.Thread(target=do_profit_growth_scan, daemon=True).start()
-        except Exception:
-            pass
-
     def load_home():
         try:
             time.sleep(2)
             # Populate the full ~2000 stock search index right away, so
-            # search/watchlist-add works even before the user taps Sync.
+            # search/watchlist-add works even before the first refresh cycle.
             def universe_progress(msg):
-                sync_status_text.value = msg
+                market_status_text.value = msg
                 page.update()
             threading.Thread(
                 target=lambda: fetch_full_market_universe(db_conn, universe_progress),
@@ -2430,4 +2538,63 @@ def main(page: ft.Page):
             refresh_watchlist_list()
             refresh_news_screen()
             refresh_analytics_screen()
-            main_content.content = home_sc
+            main_content.content = home_screen
+            page.navigation_bar = bottom_nav
+            page.update()
+            # Live data starts flowing only now that the app is actually open,
+            # and stops automatically via page.on_disconnect when it's closed.
+            threading.Thread(target=auto_refresh_loop, daemon=True).start()
+        except Exception as ex:
+            show_error_screen(f"Failed to load home screen:\n{ex}")
+
+    def check_password(e):
+        if (password_input.value or "").strip() == APP_PASSWORD:
+            password_error.value = ""
+            main_content.content = splash_screen
+            page.update()
+            threading.Thread(target=load_home, daemon=True).start()
+        else:
+            password_error.value = "Wrong password. Try again."
+            password_input.value = ""
+            page.update()
+
+    password_input.on_submit = check_password
+
+    password_screen = ft.Container(
+        expand=True,
+        bgcolor=BG,
+        alignment=ft.alignment.center,
+        content=ft.Column(
+            [
+                ft.Container(
+                    content=ft.Icon(Icons.LOCK, size=54, color=ACCENT),
+                    padding=20, bgcolor=SURFACE, border_radius=20,
+                    border=ft.border.all(1, BORDER),
+                ),
+                ft.Container(height=18),
+                ft.Text("StockAI PRO", size=26, weight=ft.FontWeight.W_900, color=TEXT_PRIMARY,
+                        style=ft.TextStyle(letter_spacing=1.5)),
+                ft.Text("Enter password to continue", size=13, color=TEXT_SECONDARY),
+                ft.Container(height=24),
+                password_input,
+                ft.Container(height=12),
+                ft.ElevatedButton(
+                    "OK", on_click=check_password, width=260,
+                    color=Colors.WHITE, bgcolor=ACCENT,
+                    style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=14), padding=16, elevation=0),
+                ),
+                ft.Container(height=8),
+                password_error,
+            ],
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            alignment=ft.MainAxisAlignment.CENTER,
+        ),
+    )
+
+    # ---------- INITIAL RENDER: PASSWORD FIRST ----------
+    main_content.content = password_screen
+    page.add(main_content)
+
+
+if __name__ == "__main__":
+    ft.app(target=main) 
