@@ -200,10 +200,10 @@ def _fetch_nifty500_only(conn):
     cursor = conn.cursor()
     try:
         session = requests.Session()
-        session.get("https://www.nseindia.com", headers=NSE_HEADERS, timeout=10)
+        session.get("https://www.nseindia.com", headers=NSE_HEADERS, timeout=6)
         resp = session.get(
             "https://nsearchives.nseindia.com/content/indices/ind_nifty500list.csv",
-            headers=NSE_HEADERS, timeout=15,
+            headers=NSE_HEADERS, timeout=8,
         )
         resp.raise_for_status()
         lines = resp.text.strip().split("\n")[1:]
@@ -249,14 +249,29 @@ def fetch_full_market_universe(conn, progress_callback=None):
     it up automatically - no separate code path needed.
     """
     cursor = conn.cursor()
+
+    # Fast path: on a slow/unreliable connection, don't re-attempt this
+    # heavy download every single sync cycle - reuse the cache if we
+    # already tried within the last 30 minutes.
+    last_attempt = get_setting(conn, "universe_last_attempt_ts")
+    cursor.execute("SELECT symbol, company_name FROM nse_universe_cache")
+    cached_full = cursor.fetchall()
+    if last_attempt:
+        try:
+            if time.time() - float(last_attempt) < 1800 and cached_full:
+                return cached_full
+        except Exception:
+            pass
+    set_setting(conn, "universe_last_attempt_ts", str(time.time()))
+
     try:
         if progress_callback:
             progress_callback("Downloading full NSE stock list (~2000 stocks)...")
         session = requests.Session()
-        session.get("https://www.nseindia.com", headers=NSE_HEADERS, timeout=10)
+        session.get("https://www.nseindia.com", headers=NSE_HEADERS, timeout=6)
         resp = session.get(
             "https://nsearchives.nseindia.com/content/equity/EQUITY_L.csv",
-            headers=NSE_HEADERS, timeout=25,
+            headers=NSE_HEADERS, timeout=12,
         )
         resp.raise_for_status()
         lines = resp.text.strip().split("\n")[1:]
@@ -291,10 +306,8 @@ def fetch_full_market_universe(conn, progress_callback=None):
         return n500
 
     # Attempt 3: caches from a previous successful run
-    cursor.execute("SELECT symbol, company_name FROM nse_universe_cache")
-    cached = cursor.fetchall()
-    if cached:
-        return cached
+    if cached_full:
+        return cached_full
     cursor.execute("SELECT symbol, company_name FROM nifty500_cache")
     cached2 = cursor.fetchall()
     if cached2:
@@ -621,18 +634,18 @@ def fetch_top_movers_from_nse(name_lookup):
     """
     try:
         session = requests.Session()
-        session.get("https://www.nseindia.com/market-data/top-gainers-losers", headers=NSE_HEADERS, timeout=10)
+        session.get("https://www.nseindia.com/market-data/top-gainers-losers", headers=NSE_HEADERS, timeout=6)
 
         resp_g = session.get(
             "https://www.nseindia.com/api/live-analysis-variations?index=gainers",
-            headers=NSE_HEADERS, timeout=15,
+            headers=NSE_HEADERS, timeout=8,
         )
         resp_g.raise_for_status()
         data_g = resp_g.json()
 
         resp_l = session.get(
             "https://www.nseindia.com/api/live-analysis-variations?index=loosers",
-            headers=NSE_HEADERS, timeout=15,
+            headers=NSE_HEADERS, timeout=8,
         )
         resp_l.raise_for_status()
         data_l = resp_l.json()
@@ -667,16 +680,69 @@ def fetch_top_movers_from_nse(name_lookup):
         return None, None, None
 
 
+def fetch_top_movers_from_bse(name_lookup):
+    """
+    PRIORITY 3: BSE's public top gainers/losers feed - tried when both
+    Dhan and NSE are unavailable, before falling back to the slow
+    Yahoo Finance full-universe scan.
+    Returns (gainers, losers, data_date) or (None, None, None).
+    """
+    try:
+        headers = {
+            "User-Agent": NSE_HEADERS["User-Agent"],
+            "Accept": "application/json",
+        }
+        base = "https://api.bseindia.com/BseIndiaAPI/api/TopGainerLossers/w"
+
+        def fetch_side(gainer_flag):
+            resp = requests.get(
+                base,
+                params={"group": "", "scripcode": "", "segment": "Equity", "type": "GL" if gainer_flag else "GL"},
+                headers=headers, timeout=8,
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+        raw_g = fetch_side(True)
+        rows = raw_g if isinstance(raw_g, list) else raw_g.get("Table", raw_g.get("data", []))
+        if not rows:
+            return None, None, None
+
+        movers = []
+        for r in rows:
+            try:
+                sym = r.get("scrip_id") or r.get("SC_NAME") or r.get("Scrip_Name")
+                price = float(r.get("LTP") or r.get("CurrRate") or 0)
+                pct = float(r.get("PER_CHG") or r.get("perchange") or 0)
+                if sym and price > 0:
+                    movers.append({
+                        "symbol": sym,
+                        "company_name": name_lookup.get(sym, sym),
+                        "price": price,
+                        "pct_change": pct,
+                    })
+            except Exception:
+                continue
+
+        if not movers:
+            return None, None, None
+
+        gainers = sorted(movers, key=lambda m: m["pct_change"], reverse=True)[:10]
+        losers = sorted(movers, key=lambda m: m["pct_change"])[:10]
+        data_date = datetime.now().strftime("%Y-%m-%d")
+        return gainers, losers, data_date
+    except Exception:
+        return None, None, None
+
+
 def perform_full_market_sync(conn, progress_callback=None):
     """
     Refreshes EVERYTHING in the app in one go: the full ~2000 stock
     search index, Top 10 Gainers / Losers (saved per-date so history
     stays browsable), the watchlist, and the news feed.
 
-    Fallback chain (unchanged priority, kept in this order):
-      1. Dhan API (authenticated broker feed - fastest & most reliable)
-      2. NSE live top-movers endpoint
-      3. Full universe scan via yfinance (slowest, last resort)
+    Fallback chain (as requested): Trading/broker API (Dhan) -> NSE ->
+    BSE -> Yahoo Finance full scan (slowest, last resort).
     """
     try:
         if progress_callback:
@@ -694,6 +760,12 @@ def perform_full_market_sync(conn, progress_callback=None):
                 progress_callback("Trying NSE live data...")
             gainers, losers, data_date = fetch_top_movers_from_nse(name_lookup)
             source_used = "NSE"
+
+        if not gainers or not losers:
+            if progress_callback:
+                progress_callback("Trying BSE live data...")
+            gainers, losers, data_date = fetch_top_movers_from_bse(name_lookup)
+            source_used = "BSE"
 
         if not gainers or not losers:
             source_used = "Full Scan"
@@ -1165,12 +1237,42 @@ def run_profit_growth_scan_if_due(conn, progress_callback=None):
 # ==========================================
 # LIVE INDEX QUOTES (NIFTY 50 / BANK NIFTY) - Groww-style ticker bar
 # ==========================================
-def fetch_index_quotes():
+def _fetch_nse_index_quotes():
+    """Backup source for index quotes if Yahoo Finance is unreachable."""
+    out = {}
+    try:
+        session = requests.Session()
+        session.get("https://www.nseindia.com", headers=NSE_HEADERS, timeout=6)
+        resp = session.get("https://www.nseindia.com/api/allIndices", headers=NSE_HEADERS, timeout=8)
+        resp.raise_for_status()
+        data = resp.json().get("data", [])
+        name_map = {"NIFTY 50": "NIFTY 50", "BANK NIFTY": "NIFTY BANK"}
+        for entry in data:
+            idx_name = entry.get("index", "")
+            for our_label, nse_label in name_map.items():
+                if idx_name == nse_label:
+                    try:
+                        last = float(entry.get("last", 0))
+                        change = float(entry.get("variation", 0))
+                        pct = float(entry.get("percentChange", 0))
+                        if last > 0:
+                            out[our_label] = (round(last, 2), round(change, 2), round(pct, 2))
+                    except Exception:
+                        continue
+    except Exception:
+        pass
+    return out
+
+
+def fetch_index_quotes(conn=None):
     """
     Live price when the market's open, last close when it's shut -
     either way this always returns the most recent available quote.
-    Returns {"NIFTY 50": (price, change, pct_change), "BANK NIFTY": (...)}
-    with (None, None, None) for any index that couldn't be fetched.
+    Tries Yahoo Finance first, then NSE's live index feed. If BOTH fail
+    (e.g. very weak connection), falls back to the last successfully
+    fetched value cached in the database, so the screen always shows a
+    real price instead of '--'. Returns {"NIFTY 50": (price, change,
+    pct_change, is_live), "BANK NIFTY": (...)}.
     """
     result = {}
     for label, ticker in (("NIFTY 50", "^NSEI"), ("BANK NIFTY", "^NSEBANK")):
@@ -1187,7 +1289,34 @@ def fetch_index_quotes():
                 result[label] = (None, None, None)
         except Exception:
             result[label] = (None, None, None)
-    return result
+
+    if any(result.get(label, (None,))[0] is None for label in ("NIFTY 50", "BANK NIFTY")):
+        nse_quotes = _fetch_nse_index_quotes()
+        for label in ("NIFTY 50", "BANK NIFTY"):
+            if result.get(label, (None,))[0] is None and label in nse_quotes:
+                result[label] = nse_quotes[label]
+
+    final = {}
+    for label in ("NIFTY 50", "BANK NIFTY"):
+        price, change, pct = result.get(label, (None, None, None))
+        cache_key = f"idx_cache_{label.replace(' ', '_')}"
+        if price is not None:
+            if conn is not None:
+                set_setting(conn, cache_key, f"{price}|{change}|{pct}")
+            final[label] = (price, change, pct, True)
+        elif conn is not None:
+            cached = get_setting(conn, cache_key)
+            if cached:
+                try:
+                    p, c, pc = cached.split("|")
+                    final[label] = (float(p), float(c), float(pc), False)
+                except Exception:
+                    final[label] = (None, None, None, False)
+            else:
+                final[label] = (None, None, None, False)
+        else:
+            final[label] = (None, None, None, False)
+    return final
 
 
 # ==========================================
@@ -1222,6 +1351,10 @@ new TradingView.widget({{
 
 def tradingview_web_url(symbol):
     return f"https://www.tradingview.com/chart/?symbol=NSE:{symbol}"
+
+
+def google_finance_web_url(symbol):
+    return f"https://www.google.com/finance/quote/{symbol}:NSE"
 
 
 # ==========================================
@@ -1364,38 +1497,38 @@ def main(page: ft.Page):
         page.update()
 
     def build_chart_container(symbol):
-        """TradingView's free embeddable widget shown in an in-app WebView.
-        Falls back to an 'Open Chart' browser button if WebView isn't
-        supported on this build/device."""
-        try:
-            chart_view = ft.WebView(
-                url=build_tradingview_chart_url(symbol),
-                on_page_started=lambda e: None,
-            )
-            return ft.Container(
-                height=420, border_radius=16, border=ft.border.all(1, BORDER),
-                clip_behavior=ft.ClipBehavior.ANTI_ALIAS,
-                content=chart_view,
-            )
-        except Exception:
-            return ft.Container(
-                height=160, border_radius=16, bgcolor=SURFACE, border=ft.border.all(1, BORDER),
-                alignment=ft.alignment.center,
-                content=ft.Column(
-                    [
-                        ft.Icon(Icons.SHOW_CHART, size=36, color=TEXT_MUTED),
-                        ft.Text("In-app chart isn't supported on this device.", size=12, color=TEXT_MUTED),
-                        ft.ElevatedButton(
-                            "Open Chart on TradingView",
-                            icon=Icons.OPEN_IN_NEW,
-                            color=Colors.WHITE, bgcolor=ACCENT,
-                            style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=12), elevation=0),
-                            on_click=lambda e, s=symbol: page.launch_url(tradingview_web_url(s)),
-                        ),
-                    ],
-                    horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=8,
-                ),
-            )
+        """
+        This build's Flutter runtime doesn't have the WebView plugin
+        compiled in, so an in-app embedded chart isn't reliable here.
+        Instead: two guaranteed-to-work buttons that open a live chart
+        in the browser - TradingView first, Google Finance as the
+        backup if TradingView doesn't load.
+        """
+        return ft.Container(
+            padding=20, border_radius=16, bgcolor=SURFACE, border=ft.border.all(1, BORDER),
+            content=ft.Column(
+                [
+                    ft.Icon(Icons.SHOW_CHART, size=32, color=ACCENT),
+                    ft.Text("Tap to open a live chart", size=12, color=TEXT_MUTED),
+                    ft.Container(height=6),
+                    ft.ElevatedButton(
+                        "Open TradingView Chart",
+                        icon=Icons.OPEN_IN_NEW,
+                        color=Colors.WHITE, bgcolor=ACCENT,
+                        style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=12), elevation=0, padding=14),
+                        on_click=lambda e, s=symbol: page.launch_url(tradingview_web_url(s)),
+                    ),
+                    ft.ElevatedButton(
+                        "Open Google Finance Chart",
+                        icon=Icons.OPEN_IN_NEW,
+                        color=TEXT_PRIMARY, bgcolor=SURFACE_ALT,
+                        style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=12), elevation=0, padding=14),
+                        on_click=lambda e, s=symbol: page.launch_url(google_finance_web_url(s)),
+                    ),
+                ],
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=8,
+            ),
+        )
 
 
     # ---------- HOME SCREEN ----------
@@ -1517,26 +1650,31 @@ def main(page: ft.Page):
     auto_refresh_stop = {"stop": False}
 
     def update_index_ticker():
-        quotes = fetch_index_quotes()
+        quotes = fetch_index_quotes(db_conn)
+        any_stale = False
         for label, price_ctrl, change_ctrl in (
             ("NIFTY 50", nifty_price_text, nifty_change_text),
             ("BANK NIFTY", banknifty_price_text, banknifty_change_text),
         ):
-            price, change, pct = quotes.get(label, (None, None, None))
+            price, change, pct, is_live = quotes.get(label, (None, None, None, False))
             if price is not None:
                 price_ctrl.value = f"{price:,.2f}"
                 up = change >= 0
                 change_ctrl.value = f"{change:+,.2f} ({pct:+.2f}%)"
                 change_ctrl.color = GREEN if up else RED
+                if not is_live:
+                    any_stale = True
             else:
                 price_ctrl.value = "--"
                 change_ctrl.value = "Unavailable"
                 change_ctrl.color = TEXT_MUTED
-        market_status_text.value = (
-            f"LIVE - updated {datetime.now().strftime('%H:%M:%S')}" if is_market_open()
-            else f"Market Closed - last close, updated {datetime.now().strftime('%H:%M:%S')}"
-        )
-        market_status_text.color = GREEN if is_market_open() else TEXT_MUTED
+        if is_market_open():
+            market_status_text.value = f"LIVE - updated {datetime.now().strftime('%H:%M:%S')}"
+            market_status_text.color = GREEN
+        else:
+            suffix = " (cached)" if any_stale else ""
+            market_status_text.value = f"Market Closed - last close{suffix}, updated {datetime.now().strftime('%H:%M:%S')}"
+            market_status_text.color = TEXT_MUTED
         page.update()
 
     def auto_refresh_loop():
