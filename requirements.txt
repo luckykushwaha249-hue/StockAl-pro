@@ -1,5 +1,4 @@
 flet==0.28.3
-flet-webview        # ← correct package for embedded charts
+flet-webview
 yfinance==0.2.40
 requests
-# reportlab          # optional – only needed for PDF reports
