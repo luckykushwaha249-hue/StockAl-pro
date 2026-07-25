@@ -29,11 +29,11 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install flet
+          pip install "flet==0.28.3"
           pip install -r requirements.txt
 
       - name: Build APK
-        run: flet build apk --verbose
+        run: flet build apk --verbose --include-packages flet_webview
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
